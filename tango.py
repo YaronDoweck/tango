@@ -221,13 +221,46 @@ def load_prompts_config(script_dir, config_override=None, base_dir=None):
 # ---------------------------------------------------------------------------
 
 
+def _popen(cmd, cwd):
+    return subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def _stream_print(label, text):
+    if text:
+        print(f"[{label}] {text}", end="", flush=True)
+
+
 def run_claude(prompt, cwd, allowed_tools, permission_mode="bypassPermissions"):
+    fmt = "stream-json" if STREAM else "json"
     cmd = ["claude", "-p", prompt,
-           "--output-format", "json",
+           "--output-format", fmt,
            "--allowedTools", allowed_tools,
            "--permission-mode", permission_mode]
     if AGENT_MODELS["claude"]:
         cmd += ["--model", AGENT_MODELS["claude"]]
+
+    if STREAM:
+        proc = _popen(cmd, cwd)
+        result = ""
+        print()
+        for line in proc.stdout:
+            try:
+                evt = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if evt.get("type") == "assistant":
+                for block in evt.get("message", {}).get("content", []):
+                    if block.get("type") == "text":
+                        _stream_print("claude", block["text"])
+            elif evt.get("type") == "result":
+                result = evt.get("result", "")
+        stderr = proc.stderr.read()
+        proc.wait()
+        print()
+        if proc.returncode != 0:
+            raise RuntimeError(f"claude exited {proc.returncode}\nSTDERR:\n{stderr[-2000:]}")
+        return result
+
     proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
     if proc.returncode != 0:
         raise RuntimeError(f"claude exited {proc.returncode}\nSTDERR:\n{proc.stderr[-2000:]}")
@@ -238,12 +271,10 @@ def run_claude(prompt, cwd, allowed_tools, permission_mode="bypassPermissions"):
 def run_codex(prompt, cwd, sandbox="workspace-write", schema_path=None, out_path=None):
     cmd = ["codex", "exec", prompt, "--json", "--sandbox", sandbox]
     if sandbox == "read-only":
-        # No write-bypass needed; skip approval prompts via config.
         # ponytail: unknown exact key — adjust if codex prompts for confirmation.
         cmd += ["-c", "approval_policy=\"never\""]
     else:
-        # Writer needs to execute commands; bypass approval prompts.
-        # Note: this also bypasses the sandbox restriction (known limitation).
+        # Note: also bypasses sandbox restriction (known limitation).
         cmd += ["--dangerously-bypass-approvals-and-sandbox"]
     if AGENT_MODELS["codex"]:
         cmd += ["--model", AGENT_MODELS["codex"]]
@@ -251,23 +282,50 @@ def run_codex(prompt, cwd, sandbox="workspace-write", schema_path=None, out_path
         cmd += ["--output-schema", str(schema_path)]
     if out_path:
         cmd += ["-o", str(out_path)]
+
+    def _parse_codex_jsonl(lines):
+        text = ""
+        for line in lines:
+            try:
+                evt = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            method = str(evt.get("method", ""))
+            if "agentMessage" in method:
+                params = evt.get("params", {})
+                text += params.get("delta") or params.get("message") or ""
+        return text
+
+    if STREAM:
+        proc = _popen(cmd, cwd)
+        lines = []
+        print()
+        for line in proc.stdout:
+            lines.append(line)
+            try:
+                evt = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            method = str(evt.get("method", ""))
+            if "agentMessage" in method:
+                params = evt.get("params", {})
+                chunk = params.get("delta") or params.get("message") or ""
+                _stream_print("codex", chunk)
+        stderr = proc.stderr.read()
+        proc.wait()
+        print()
+        if proc.returncode != 0:
+            raise RuntimeError(f"codex exited {proc.returncode}\nSTDERR:\n{stderr[-2000:]}")
+        if out_path:
+            return out_path.read_text()
+        return _parse_codex_jsonl(lines)
+
     proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
     if proc.returncode != 0:
         raise RuntimeError(f"codex exited {proc.returncode}\nSTDERR:\n{proc.stderr[-2000:]}")
     if out_path:
         return out_path.read_text()
-    # Fallback: pull the agent's final text out of the JSONL event stream.
-    text = ""
-    for line in proc.stdout.splitlines():
-        try:
-            evt = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        method = str(evt.get("method", ""))
-        if "agentMessage" in method:
-            params = evt.get("params", {})
-            text += params.get("delta") or params.get("message") or ""
-    return text
+    return _parse_codex_jsonl(proc.stdout.splitlines())
 
 
 def extract_json(text):
@@ -290,6 +348,7 @@ def extract_json(text):
 # ---------------------------------------------------------------------------
 
 DRY_RUN = False
+STREAM = False
 _dry_counters = {}       # (phase, tag) -> call count
 _dry_committed = set()   # phases where fake code-write happened
 
@@ -675,7 +734,7 @@ def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_
 def main():
     global LOG_DIR
 
-    global DRY_RUN
+    global DRY_RUN, STREAM
     script_dir = pathlib.Path(__file__).parent
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -696,6 +755,8 @@ def main():
     parser.add_argument("--reset", action="store_true", help="Clear saved state for this phase and start fresh.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Simulate all steps without calling agents or committing. Shows prompts and state.")
+    parser.add_argument("--stream", action="store_true",
+                        help="Print agent output in real-time as it arrives.")
     args = parser.parse_args()
 
     cwd = pathlib.Path(args.repo_dir).resolve()
@@ -721,6 +782,10 @@ def main():
         for k, v in AGENT_MODELS.items():
             if v:
                 print(f"[tango] {k} model: {v}")
+
+    if args.stream:
+        STREAM = True
+        print("[tango] streaming mode: agent output printed in real-time.")
 
     if args.dry_run:
         DRY_RUN = True
