@@ -542,7 +542,11 @@ def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir,
     write_plan_path = plans_dir / f"phase-{phase}.md"
     write_plan_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if write_plan_path.exists():
+    override_exists = plan_override and (
+        (cwd / plan_override) if not pathlib.Path(plan_override).is_absolute()
+        else pathlib.Path(plan_override)
+    ).exists()
+    if write_plan_path.exists() or override_exists:
         print(f"[phase {phase}] plan file exists, skipping write step.")
         write_time = None
     else:
