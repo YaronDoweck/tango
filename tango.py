@@ -464,8 +464,8 @@ def resolve_plan(phase, plan_override, plans_dir, cwd):
     conventional = plans_dir / f"phase-{phase}.md"
     if conventional.exists():
         return conventional
-    # Auto-detect: scan git status for untracked/modified .md files
-    r = subprocess.run(["git", "status", "--short", "--porcelain"],
+    # Auto-detect: scan git status (including ignored) for .md files
+    r = subprocess.run(["git", "status", "--short", "--porcelain", "--ignored"],
                        cwd=cwd, capture_output=True, text=True, check=True)
     candidates = [cwd / line[3:].strip() for line in r.stdout.splitlines()
                   if line[3:].strip().endswith(".md")]
