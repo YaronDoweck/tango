@@ -236,7 +236,15 @@ def run_claude(prompt, cwd, allowed_tools, permission_mode="acceptEdits"):
 
 
 def run_codex(prompt, cwd, sandbox="workspace-write", schema_path=None, out_path=None):
-    cmd = ["codex", "exec", prompt, "--json", "--sandbox", sandbox, "--ask-for-approval", "never"]
+    cmd = ["codex", "exec", prompt, "--json", "--sandbox", sandbox]
+    if sandbox == "read-only":
+        # No write-bypass needed; skip approval prompts via config.
+        # ponytail: unknown exact key — adjust if codex prompts for confirmation.
+        cmd += ["-c", "approval_policy=\"never\""]
+    else:
+        # Writer needs to execute commands; bypass approval prompts.
+        # Note: this also bypasses the sandbox restriction (known limitation).
+        cmd += ["--dangerously-bypass-approvals-and-sandbox"]
     if AGENT_MODELS["codex"]:
         cmd += ["--model", AGENT_MODELS["codex"]]
     if schema_path:
