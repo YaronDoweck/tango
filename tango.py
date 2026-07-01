@@ -75,8 +75,10 @@ VERDICT_SCHEMA = {
 PLAN_WRITE_PROMPT = """\
 You are implementing a software feature that has been broken into phases.
 
-Read the specification for this phase from: {phase_spec}
+Spec file (may contain all phases): {phase_spec}
+Current phase: {phase}
 
+Read the spec. If it covers multiple phases, focus ONLY on phase '{phase}'.
 Write a detailed implementation plan for ONLY this phase (do not write any
 code yet). Cover: approach, files/modules touched, data model or API
 changes, edge cases, and an ordered list of implementation steps.
@@ -88,11 +90,14 @@ Do not modify any other files.
 PLAN_REVIEW_PROMPT = """\
 You are reviewing an implementation plan before any code is written.
 
-Phase spec (what the plan must satisfy): {phase_spec}
+Spec file (may contain all phases): {phase_spec}
+Current phase: {phase}
 Plan to review: {plan_path}
 
-Read both files. Check the plan fully satisfies the spec, is technically
-sound, doesn't miss edge cases, and doesn't introduce unnecessary scope.
+Read both files. If the spec covers multiple phases, evaluate the plan only
+against the requirements for phase '{phase}'. Check the plan fully satisfies
+those requirements, is technically sound, doesn't miss edge cases, and
+doesn't introduce unnecessary scope.
 
 Respond with ONLY a JSON object, no other text, no markdown fences,
 matching this shape:
@@ -491,7 +496,7 @@ def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir,
     else:
         call_writer(
             writer,
-            PLAN_WRITE_PROMPT.format(phase_spec=phase_spec, plan_path=write_plan_path),
+            PLAN_WRITE_PROMPT.format(phase_spec=phase_spec, plan_path=write_plan_path, phase=phase),
             cwd, phase, "plan_write",
         )
 
@@ -505,7 +510,7 @@ def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir,
         abs_iter = fix_iter + i
         verdict = call_reviewer(
             reviewer,
-            PLAN_REVIEW_PROMPT.format(phase_spec=phase_spec, plan_path=plan_path),
+            PLAN_REVIEW_PROMPT.format(phase_spec=phase_spec, plan_path=plan_path, phase=phase),
             cwd, phase, "plan_review", state_dir,
         )
         print(f"[phase {phase}] plan review {abs_iter}/{max_iters} ({reviewer}): {verdict['verdict']}")
