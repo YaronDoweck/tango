@@ -454,7 +454,23 @@ def find_phase_base_sha(cwd, phase):
     return r2.stdout.strip() if r2.returncode == 0 else earliest
 
 
-def resolve_plan(phase, plan_override, plans_dir, cwd):
+_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".eggs"}
+
+
+def _md_files_newer_than(cwd, since_time):
+    results = []
+    for p in pathlib.Path(cwd).rglob("*.md"):
+        if any(part in _SKIP_DIRS for part in p.parts):
+            continue
+        try:
+            if p.stat().st_mtime > since_time:
+                results.append(p)
+        except OSError:
+            pass
+    return results
+
+
+def resolve_plan(phase, plan_override, plans_dir, cwd, since_time=None):
     if plan_override:
         p = pathlib.Path(plan_override)
         p = (cwd / p).resolve() if not p.is_absolute() else p.resolve()
@@ -464,18 +480,16 @@ def resolve_plan(phase, plan_override, plans_dir, cwd):
     conventional = plans_dir / f"phase-{phase}.md"
     if conventional.exists():
         return conventional
-    # Auto-detect: scan git status (including ignored) for .md files
-    r = subprocess.run(["git", "status", "--short", "--porcelain", "--ignored"],
-                       cwd=cwd, capture_output=True, text=True, check=True)
-    candidates = [cwd / line[3:].strip() for line in r.stdout.splitlines()
-                  if line[3:].strip().endswith(".md")]
+    if since_time is None:
+        sys.exit(f"No plan file at {conventional}. Pass --plan <path> or rerun the plan step.")
+    candidates = _md_files_newer_than(cwd, since_time)
     if len(candidates) == 1:
         print(f"[tango] auto-detected plan file: {candidates[0]}")
         return candidates[0]
     if len(candidates) > 1:
-        sys.exit(f"Multiple modified .md files found; specify --plan <path>:\n  " +
+        sys.exit(f"Multiple .md files written since writer ran; specify --plan <path>:\n  " +
                  "\n  ".join(str(c) for c in candidates))
-    sys.exit(f"No plan file at {conventional} and no modified .md files found in git status.")
+    sys.exit(f"No plan file at {conventional} and no new .md files found after writer ran.")
 
 
 def resolve_spec(phase, spec_override, phases_dir, cwd=None):
@@ -530,7 +544,9 @@ def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir,
 
     if write_plan_path.exists():
         print(f"[phase {phase}] plan file exists, skipping write step.")
+        write_time = None
     else:
+        write_time = time.time()
         call_writer(
             writer,
             PLAN_WRITE_PROMPT.format(phase_spec=phase_spec, plan_path=write_plan_path, phase=phase),
@@ -538,7 +554,7 @@ def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir,
         )
 
     # After write, resolve actual plan path (may differ if writer saved elsewhere)
-    plan_path = resolve_plan(phase, plan_override, plans_dir, cwd)
+    plan_path = resolve_plan(phase, plan_override, plans_dir, cwd, since_time=write_time)
 
     fix_iter = state.get("plan_fix_iter", 0)
     remaining = max_iters - fix_iter
@@ -665,7 +681,7 @@ def main():
     parser.add_argument("--spec", default=None,
                         help="Path to spec file. Overrides the default phases/phase-<N>.md lookup.")
     parser.add_argument("--plan", default=None,
-                        help="Path to plan file for the reviewer. Auto-detected from git status if omitted.")
+                        help="Path to plan file for the reviewer. Auto-detected by mtime scan if omitted.")
     parser.add_argument("--writer", required=True, choices=["claude", "codex"])
     parser.add_argument("--reviewer", required=True, choices=["claude", "codex"])
     parser.add_argument("--repo-dir", default=os.environ.get("TANGO_REPO_DIR", "."))
