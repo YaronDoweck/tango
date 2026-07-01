@@ -221,7 +221,7 @@ def load_prompts_config(script_dir, config_override=None, base_dir=None):
 # ---------------------------------------------------------------------------
 
 
-def run_claude(prompt, cwd, allowed_tools, permission_mode="acceptEdits"):
+def run_claude(prompt, cwd, allowed_tools, permission_mode="bypassPermissions"):
     cmd = ["claude", "-p", prompt,
            "--output-format", "json",
            "--allowedTools", allowed_tools,
@@ -352,7 +352,7 @@ def call_writer(agent, prompt, cwd, phase, tag):
         return response
 
     if agent == "claude":
-        text = run_claude(prompt, cwd, allowed_tools="Read,Edit,Write,Bash,Skill", permission_mode="acceptEdits")
+        text = run_claude(prompt, cwd, allowed_tools="Read,Edit,Write,Bash,Skill", permission_mode="bypassPermissions")
     elif agent == "codex":
         text = run_codex(prompt, cwd, sandbox="workspace-write")
     else:
@@ -382,7 +382,7 @@ def call_reviewer(agent, prompt, cwd, phase, tag, state_dir):
         # Read-only + narrow git inspection commands; verify this permission-rule
         # syntax against `claude -p --help` on your installed version.
         allowed = "Read,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(cat *),Skill"
-        text = run_claude(prompt, cwd, allowed_tools=allowed, permission_mode="acceptEdits")
+        text = run_claude(prompt, cwd, allowed_tools=allowed, permission_mode="bypassPermissions")
         log(tag, phase, agent, prompt, text)
         return extract_json(text)
     elif agent == "codex":
