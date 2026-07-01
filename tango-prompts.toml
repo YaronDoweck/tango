@@ -4,9 +4,13 @@
 
 # [agents.claude]
 # model = "claude-sonnet-4-6"
+# writer_skills = ["/init", "/spr"]   # prepended to every writer prompt
+# reviewer_skills = ["/code-review"]  # prepended to every reviewer prompt
 
 # [agents.codex]
 # model = "gpt-5.4"
+# writer_skills = ["$init"]
+# reviewer_skills = []
 
 [prompts]
 
