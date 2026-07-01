@@ -171,9 +171,11 @@ _PROMPT_KEYS = {
 }
 
 
-def load_prompts_config(script_dir):
-    config_path = pathlib.Path(script_dir) / "tango-prompts.toml"
+def load_prompts_config(script_dir, config_override=None):
+    config_path = pathlib.Path(config_override).resolve() if config_override else pathlib.Path(script_dir) / "tango-prompts.toml"
     if not config_path.exists():
+        if config_override:
+            sys.exit(f"Config file not found: {config_path}")
         return
     try:
         import tomllib
@@ -641,7 +643,6 @@ def main():
 
     global DRY_RUN
     script_dir = pathlib.Path(__file__).parent
-    load_prompts_config(script_dir)
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("step", choices=["plan", "implement", "phase"])
@@ -655,12 +656,14 @@ def main():
     parser.add_argument("--reviewer", required=True, choices=["claude", "codex"])
     parser.add_argument("--repo-dir", default=os.environ.get("TANGO_REPO_DIR", "."))
     parser.add_argument("--max-iters", type=int, default=5)
+    parser.add_argument("--config", default=None, help="Path to config TOML file (default: tango-prompts.toml next to script).")
     parser.add_argument("--claude-model", default=None, help="Model for claude agent (e.g. claude-opus-4-8).")
     parser.add_argument("--codex-model", default=None, help="Model for codex agent (e.g. o4-mini).")
     parser.add_argument("--reset", action="store_true", help="Clear saved state for this phase and start fresh.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Simulate all steps without calling agents or committing. Shows prompts and state.")
     args = parser.parse_args()
+    load_prompts_config(script_dir, config_override=args.config)
 
     cwd = pathlib.Path(args.repo_dir).resolve()
     if not (cwd / ".git").exists():
