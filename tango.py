@@ -240,6 +240,7 @@ def run_claude(prompt, cwd, allowed_tools, permission_mode="bypassPermissions"):
         cmd += ["--model", AGENT_MODELS["claude"]]
 
     if STREAM:
+        cmd += ["--verbose"]
         proc = _popen(cmd, cwd)
         result = ""
         print()
