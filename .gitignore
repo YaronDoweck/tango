@@ -19,8 +19,12 @@ Tasks.md
 # Specs, plans, features (Claude-generated)
 features/
 plans/
+phases/
 specs/
 docs/
+
+# Tango runtime
+.agent-workflow/
 
 # Node (root-level MCP deps)
 node_modules/

@@ -1,7 +1,12 @@
-# tango-prompts.toml -- override the built-in prompt templates.
-# All keys are optional; omit any to keep the built-in default.
-# Placeholders use Python str.format() syntax: {phase_spec}, {plan_path},
-# {phase}, {feedback}, {base_sha}, {head_sha}.
+# tango-prompts.toml -- config for tango (prompts + agent models).
+# All keys are optional; omit any to keep built-in defaults.
+# CLI flags --claude-model / --codex-model override these.
+
+# [agents.claude]
+# model = "claude-sonnet-4-6"
+
+# [agents.codex]
+# model = "gpt-5.4"
 
 [prompts]
 
@@ -29,7 +34,7 @@ sound, doesn't miss edge cases, and doesn't introduce unnecessary scope.
 
 Respond with ONLY a JSON object, no other text, no markdown fences,
 matching this shape:
-{{"verdict": "APPROVED" or "CHANGES_NEEDED", "summary": "<one paragraph>", "issues": ["<specific issue>", ...]}}
+{{"verdict": "APPROVED" or "CHANGES_NEEDED", "summary": "<one paragraph>", "issues": [{{"severity": "HIGH"|"MEDIUM"|"LOW", "description": "<specific issue>"}}]}}
 If verdict is APPROVED, issues should be an empty list.
 """
 
@@ -66,7 +71,7 @@ adherence to existing code conventions.
 
 Respond with ONLY a JSON object, no other text, no markdown fences,
 matching this shape:
-{{"verdict": "APPROVED" or "CHANGES_NEEDED", "summary": "<one paragraph>", "issues": ["<specific issue>", ...]}}
+{{"verdict": "APPROVED" or "CHANGES_NEEDED", "summary": "<one paragraph>", "issues": [{{"severity": "HIGH"|"MEDIUM"|"LOW", "description": "<specific issue>"}}]}}
 If verdict is APPROVED, issues should be an empty list.
 """
 

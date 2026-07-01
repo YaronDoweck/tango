@@ -41,12 +41,28 @@ PHASES_DIR_NAME = "phases"  # default dir for spec files (overridden by --spec)
 PLANS_DIR_NAME = "plans"  # <repo>/plans/phase-<N>.md -- plan output, agents write these
 STATE_DIR_NAME = ".agent-workflow"  # <repo>/.agent-workflow -- logs + scratch files
 
+AGENT_MODELS = {
+    "claude": None,  # None = let the CLI use its own default
+    "codex": None,
+}
+
 VERDICT_SCHEMA = {
     "type": "object",
     "properties": {
         "verdict": {"type": "string", "enum": ["APPROVED", "CHANGES_NEEDED"]},
         "summary": {"type": "string"},
-        "issues": {"type": "array", "items": {"type": "string"}},
+        "issues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                    "description": {"type": "string"},
+                },
+                "required": ["severity", "description"],
+                "additionalProperties": False,
+            },
+        },
     },
     "required": ["verdict", "summary", "issues"],
     "additionalProperties": False,
@@ -80,7 +96,7 @@ sound, doesn't miss edge cases, and doesn't introduce unnecessary scope.
 
 Respond with ONLY a JSON object, no other text, no markdown fences,
 matching this shape:
-{{"verdict": "APPROVED" or "CHANGES_NEEDED", "summary": "<one paragraph>", "issues": ["<specific issue>", ...]}}
+{{"verdict": "APPROVED" or "CHANGES_NEEDED", "summary": "<one paragraph>", "issues": [{{"severity": "HIGH"|"MEDIUM"|"LOW", "description": "<specific issue>"}}]}}
 If verdict is APPROVED, issues should be an empty list.
 """
 
@@ -117,7 +133,7 @@ adherence to existing code conventions.
 
 Respond with ONLY a JSON object, no other text, no markdown fences,
 matching this shape:
-{{"verdict": "APPROVED" or "CHANGES_NEEDED", "summary": "<one paragraph>", "issues": ["<specific issue>", ...]}}
+{{"verdict": "APPROVED" or "CHANGES_NEEDED", "summary": "<one paragraph>", "issues": [{{"severity": "HIGH"|"MEDIUM"|"LOW", "description": "<specific issue>"}}]}}
 If verdict is APPROVED, issues should be an empty list.
 """
 
@@ -164,8 +180,18 @@ def load_prompts_config(script_dir):
     for key, var in _PROMPT_KEYS.items():
         if key in prompts:
             g[var] = prompts[key]
+    agents = cfg.get("agents", {})
+    for agent_name in ("claude", "codex"):
+        model = agents.get(agent_name, {}).get("model")
+        if model:
+            AGENT_MODELS[agent_name] = model
+    loaded = []
     if prompts:
-        print(f"[tango] loaded {len(prompts)} prompt(s) from {config_path.name}")
+        loaded.append(f"{len(prompts)} prompt(s)")
+    if any(AGENT_MODELS.values()):
+        loaded.append("agent models: " + ", ".join(f"{k}={v}" for k, v in AGENT_MODELS.items() if v))
+    if loaded:
+        print(f"[tango] loaded from {config_path.name}: {', '.join(loaded)}")
 
 
 # ---------------------------------------------------------------------------
@@ -174,12 +200,12 @@ def load_prompts_config(script_dir):
 
 
 def run_claude(prompt, cwd, allowed_tools, permission_mode="acceptEdits"):
-    cmd = [
-        "claude", "-p", prompt,
-        "--output-format", "json",
-        "--allowedTools", allowed_tools,
-        "--permission-mode", permission_mode,
-    ]
+    cmd = ["claude", "-p", prompt,
+           "--output-format", "json",
+           "--allowedTools", allowed_tools,
+           "--permission-mode", permission_mode]
+    if AGENT_MODELS["claude"]:
+        cmd += ["--model", AGENT_MODELS["claude"]]
     proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
     if proc.returncode != 0:
         raise RuntimeError(f"claude exited {proc.returncode}\nSTDERR:\n{proc.stderr[-2000:]}")
@@ -189,6 +215,8 @@ def run_claude(prompt, cwd, allowed_tools, permission_mode="acceptEdits"):
 
 def run_codex(prompt, cwd, sandbox="workspace-write", schema_path=None, out_path=None):
     cmd = ["codex", "exec", prompt, "--json", "--sandbox", sandbox, "--ask-for-approval", "never"]
+    if AGENT_MODELS["codex"]:
+        cmd += ["--model", AGENT_MODELS["codex"]]
     if schema_path:
         cmd += ["--output-schema", str(schema_path)]
     if out_path:
@@ -227,9 +255,65 @@ def extract_json(text):
     raise ValueError(f"Could not parse a JSON verdict from response:\n{text[:800]}")
 
 
+# ---------------------------------------------------------------------------
+# Dry-run stubs  (activated by --dry-run; no agents called, no commits made)
+# ---------------------------------------------------------------------------
+
+DRY_RUN = False
+_dry_counters = {}       # (phase, tag) -> call count
+_dry_committed = set()   # phases where fake code-write happened
+
+_SEP = "─" * 64
+
+
+def _dry_inc(phase, tag):
+    key = (phase, tag)
+    _dry_counters[key] = _dry_counters.get(key, 0) + 1
+    return _dry_counters[key]
+
+
+def _dry_print(label, agent, tag, n, prompt, extra=""):
+    print(f"\n{_SEP}")
+    print(f"[DRY-RUN] {label}  agent={agent}  tag={tag}  round={n}")
+    print(f"\n-- PROMPT --\n{prompt.strip()}")
+    if extra:
+        print(f"\n{extra}")
+    print(f"{_SEP}\n")
+
+
+# ---------------------------------------------------------------------------
+# Agent dispatchers
+# ---------------------------------------------------------------------------
+
+
 def call_writer(agent, prompt, cwd, phase, tag):
+    if DRY_RUN:
+        n = _dry_inc(phase, tag)
+        _dry_print("WRITER", agent, tag, n, prompt)
+        response = f"[dry-run {tag} call {n}]"
+        log(tag, phase, agent, prompt, response)
+        if tag == "plan_write":
+            plan_path = cwd / PLANS_DIR_NAME / f"phase-{phase}.md"
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            plan_path.write_text(
+                f"# Dry-run plan for phase {phase}\n\n"
+                f"Steps:\n1. Do X\n2. Do Y\n3. Do Z\n"
+            )
+            print(f"[DRY-RUN] wrote fake plan → {plan_path}")
+        elif tag == "plan_fix":
+            plan_path = cwd / PLANS_DIR_NAME / f"phase-{phase}.md"
+            plan_path.write_text(
+                f"# Dry-run plan for phase {phase} (fix {n})\n\n"
+                f"Updated steps after reviewer feedback.\n"
+            )
+            print(f"[DRY-RUN] updated fake plan → {plan_path}")
+        elif tag in ("code_write", "code_fix"):
+            _dry_committed.add(phase)
+            print(f"[DRY-RUN] fake commit recorded for phase {phase} (no actual git commit).")
+        return response
+
     if agent == "claude":
-        text = run_claude(prompt, cwd, allowed_tools="Read,Edit,Write,Bash", permission_mode="acceptEdits")
+        text = run_claude(prompt, cwd, allowed_tools="Read,Edit,Write,Bash,Skill", permission_mode="acceptEdits")
     elif agent == "codex":
         text = run_codex(prompt, cwd, sandbox="workspace-write")
     else:
@@ -239,10 +323,25 @@ def call_writer(agent, prompt, cwd, phase, tag):
 
 
 def call_reviewer(agent, prompt, cwd, phase, tag, state_dir):
+    if DRY_RUN:
+        n = _dry_inc(phase, tag)
+        approve = n >= 3
+        verdict = (
+            {"verdict": "APPROVED", "summary": "dry-run auto-approval on round 3", "issues": []}
+            if approve else
+            {"verdict": "CHANGES_NEEDED", "summary": f"dry-run feedback round {n}",
+             "issues": [{"severity": "HIGH", "description": f"issue {n}a: something needs fixing"},
+                        {"severity": "LOW",  "description": f"issue {n}b: minor concern"}]}
+        )
+        _dry_print("REVIEWER", agent, tag, n, prompt,
+                   f"-- VERDICT --\n{json.dumps(verdict, indent=2)}")
+        log(tag, phase, agent, prompt, json.dumps(verdict))
+        return verdict
+
     if agent == "claude":
         # Read-only + narrow git inspection commands; verify this permission-rule
         # syntax against `claude -p --help` on your installed version.
-        allowed = "Read,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(cat *)"
+        allowed = "Read,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(cat *),Skill"
         text = run_claude(prompt, cwd, allowed_tools=allowed, permission_mode="acceptEdits")
         log(tag, phase, agent, prompt, text)
         return extract_json(text)
@@ -294,7 +393,9 @@ def get_head(cwd):
     ).stdout.strip()
 
 
-def git_advanced(cwd, before_sha):
+def git_advanced(cwd, before_sha, phase=None):
+    if DRY_RUN and phase is not None:
+        return phase in _dry_committed
     return get_head(cwd) != before_sha
 
 
@@ -313,15 +414,48 @@ def find_phase_base_sha(cwd, phase):
     return r2.stdout.strip() if r2.returncode == 0 else earliest
 
 
+def resolve_plan(phase, plan_override, plans_dir, cwd):
+    if plan_override:
+        p = pathlib.Path(plan_override).resolve()
+        if not p.exists():
+            sys.exit(f"Plan file not found: {p}")
+        return p
+    conventional = plans_dir / f"phase-{phase}.md"
+    if conventional.exists():
+        return conventional
+    # Auto-detect: scan git status for untracked/modified .md files
+    r = subprocess.run(["git", "status", "--short", "--porcelain"],
+                       cwd=cwd, capture_output=True, text=True, check=True)
+    candidates = [cwd / line[3:].strip() for line in r.stdout.splitlines()
+                  if line[3:].strip().endswith(".md")]
+    if len(candidates) == 1:
+        print(f"[tango] auto-detected plan file: {candidates[0]}")
+        return candidates[0]
+    if len(candidates) > 1:
+        sys.exit(f"Multiple modified .md files found; specify --plan <path>:\n  " +
+                 "\n  ".join(str(c) for c in candidates))
+    sys.exit(f"No plan file at {conventional} and no modified .md files found in git status.")
+
+
 def resolve_spec(phase, spec_override, phases_dir):
     if spec_override:
         p = pathlib.Path(spec_override).resolve()
         if not p.exists():
-            sys.exit(f"Spec file not found: {p}")
+            if DRY_RUN:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(f"[dry-run] Spec for phase {phase}\n")
+                print(f"[DRY-RUN] created fake spec at {p}")
+            else:
+                sys.exit(f"Spec file not found: {p}")
         return p
     spec = phases_dir / f"phase-{phase}.md"
     if not spec.exists():
-        sys.exit(f"Missing phase spec: {spec} (write your phase description there, or pass --spec <path>)")
+        if DRY_RUN:
+            spec.parent.mkdir(parents=True, exist_ok=True)
+            spec.write_text(f"[dry-run] Spec for phase {phase}\n")
+            print(f"[DRY-RUN] created fake spec at {spec}")
+        else:
+            sys.exit(f"Missing phase spec: {spec} (write your phase description there, or pass --spec <path>)")
     return spec
 
 
@@ -340,7 +474,7 @@ def log(tag, phase, agent, prompt, response):
 # ---------------------------------------------------------------------------
 
 
-def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir, state_dir, spec_override=None):
+def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir, state_dir, spec_override=None, plan_override=None):
     state = load_state(state_dir, phase)
 
     if state.get("plan_approved"):
@@ -348,17 +482,21 @@ def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir,
         return True
 
     phase_spec = resolve_spec(phase, spec_override, phases_dir)
-    plan_path = plans_dir / f"phase-{phase}.md"
-    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    # Writer always saves to the conventional path; resolve_plan is used after write.
+    write_plan_path = plans_dir / f"phase-{phase}.md"
+    write_plan_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if plan_path.exists():
+    if write_plan_path.exists():
         print(f"[phase {phase}] plan file exists, skipping write step.")
     else:
         call_writer(
             writer,
-            PLAN_WRITE_PROMPT.format(phase_spec=phase_spec, plan_path=plan_path),
+            PLAN_WRITE_PROMPT.format(phase_spec=phase_spec, plan_path=write_plan_path),
             cwd, phase, "plan_write",
         )
+
+    # After write, resolve actual plan path (may differ if writer saved elsewhere)
+    plan_path = resolve_plan(phase, plan_override, plans_dir, cwd)
 
     fix_iter = state.get("plan_fix_iter", 0)
     remaining = max_iters - fix_iter
@@ -378,7 +516,7 @@ def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir,
             return True
         if i == remaining:
             break
-        feedback = "\n".join(f"- {x}" for x in verdict["issues"]) or verdict["summary"]
+        feedback = "\n".join(f"- [{x['severity']}] {x['description']}" for x in verdict["issues"]) or verdict["summary"]
         call_writer(
             writer,
             PLAN_FIX_PROMPT.format(plan_path=plan_path, feedback=feedback),
@@ -392,7 +530,7 @@ def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir,
     return False
 
 
-def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir, state_dir, spec_override=None):
+def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir, state_dir, spec_override=None, plan_override=None):
     state = load_state(state_dir, phase)
 
     if state.get("code_approved"):
@@ -400,9 +538,7 @@ def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_
         return True
 
     phase_spec = resolve_spec(phase, spec_override, phases_dir)
-    plan_path = plans_dir / f"phase-{phase}.md"
-    if not plan_path.exists():
-        sys.exit(f"No plan found at {plan_path}. Run the `plan` step first.")
+    plan_path = resolve_plan(phase, plan_override, plans_dir, cwd)
 
     # Prefer git-history detection (survives restarts); fall back to stored state; else capture now.
     git_base = find_phase_base_sha(cwd, phase)
@@ -421,7 +557,7 @@ def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_
               f"base_sha set to current HEAD ({base_sha[:7]}). "
               f"Ensure writer uses 'phase-{phase}: ' commit prefix so reviews cover all phase work.")
 
-    if git_advanced(cwd, base_sha):
+    if git_advanced(cwd, base_sha, phase=phase):
         print(f"[phase {phase}] commits exist past base_sha, skipping write step.")
     else:
         call_writer(
@@ -429,7 +565,7 @@ def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_
             CODE_WRITE_PROMPT.format(plan_path=plan_path, phase_spec=phase_spec, phase=phase),
             cwd, phase, "code_write",
         )
-        if not git_advanced(cwd, base_sha):
+        if not git_advanced(cwd, base_sha, phase=phase):
             sys.exit(f"{writer} did not commit anything for phase {phase}. Check {LOG_DIR} and fix manually.")
 
     fix_iter = state.get("code_fix_iter", 0)
@@ -452,14 +588,14 @@ def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_
             return True
         if i == remaining:
             break
-        feedback = "\n".join(f"- {x}" for x in verdict["issues"]) or verdict["summary"]
+        feedback = "\n".join(f"- [{x['severity']}] {x['description']}" for x in verdict["issues"]) or verdict["summary"]
         pre_fix_sha = get_head(cwd)
         call_writer(
             writer,
             CODE_FIX_PROMPT.format(feedback=feedback, phase=phase),
             cwd, phase, "code_fix",
         )
-        if not git_advanced(cwd, pre_fix_sha):
+        if not git_advanced(cwd, pre_fix_sha, phase=phase):
             print(f"[phase {phase}] WARNING: {writer} made no fix commit -- next review will likely repeat.")
         state["code_fix_iter"] = abs_iter
         save_state(state_dir, phase, state)
@@ -477,6 +613,7 @@ def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_
 def main():
     global LOG_DIR
 
+    global DRY_RUN
     script_dir = pathlib.Path(__file__).parent
     load_prompts_config(script_dir)
 
@@ -486,11 +623,17 @@ def main():
                         help="Phase identifier (used for naming, state, and commit-message grep).")
     parser.add_argument("--spec", default=None,
                         help="Path to spec file. Overrides the default phases/phase-<N>.md lookup.")
+    parser.add_argument("--plan", default=None,
+                        help="Path to plan file for the reviewer. Auto-detected from git status if omitted.")
     parser.add_argument("--writer", required=True, choices=["claude", "codex"])
     parser.add_argument("--reviewer", required=True, choices=["claude", "codex"])
     parser.add_argument("--repo-dir", default=os.environ.get("TANGO_REPO_DIR", "."))
     parser.add_argument("--max-iters", type=int, default=5)
+    parser.add_argument("--claude-model", default=None, help="Model for claude agent (e.g. claude-opus-4-8).")
+    parser.add_argument("--codex-model", default=None, help="Model for codex agent (e.g. o4-mini).")
     parser.add_argument("--reset", action="store_true", help="Clear saved state for this phase and start fresh.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Simulate all steps without calling agents or committing. Shows prompts and state.")
     args = parser.parse_args()
 
     cwd = pathlib.Path(args.repo_dir).resolve()
@@ -506,6 +649,19 @@ def main():
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "verdict-schema.json").write_text(json.dumps(VERDICT_SCHEMA, indent=2))
 
+    if args.claude_model:
+        AGENT_MODELS["claude"] = args.claude_model
+    if args.codex_model:
+        AGENT_MODELS["codex"] = args.codex_model
+    if any(AGENT_MODELS.values()):
+        for k, v in AGENT_MODELS.items():
+            if v:
+                print(f"[tango] {k} model: {v}")
+
+    if args.dry_run:
+        DRY_RUN = True
+        print("[tango] DRY-RUN mode: no agents called, no commits made.")
+
     if args.reset:
         reset_state(state_dir, args.phase)
 
@@ -515,12 +671,12 @@ def main():
     ok = True
     if args.step in ("plan", "phase"):
         ok = run_planning(args.phase, args.writer, args.reviewer, cwd, args.max_iters,
-                           phases_dir, plans_dir, state_dir, spec_override=args.spec)
+                           phases_dir, plans_dir, state_dir, spec_override=args.spec, plan_override=args.plan)
         if not ok:
             sys.exit(1)
     if args.step in ("implement", "phase"):
         ok = run_implementing(args.phase, args.writer, args.reviewer, cwd, args.max_iters,
-                               phases_dir, plans_dir, state_dir, spec_override=args.spec)
+                               phases_dir, plans_dir, state_dir, spec_override=args.spec, plan_override=args.plan)
         if not ok:
             sys.exit(1)
 
