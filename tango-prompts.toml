@@ -2,15 +2,25 @@
 # All keys are optional; omit any to keep built-in defaults.
 # CLI flags --claude-model / --codex-model override these.
 
+# Skills are prepended to the prompt before each agent call.
+# Tag-specific key wins over role fallback. Resolution order:
+#   plan_write_skills > writer_skills   (for plan write step)
+#   code_write_skills > writer_skills   (for code write step)
+#   plan_review_skills > reviewer_skills
+#   code_review_skills > reviewer_skills
+# Omit or comment out any key to skip skills for that step.
+
 # [agents.claude]
 # model = "claude-sonnet-4-6"
-# writer_skills = ["/init", "/spr"]   # prepended to every writer prompt
-# reviewer_skills = ["/code-review"]  # prepended to every reviewer prompt
+# plan_write_skills = ["/init", "/spr"]  # skills only for plan writing
+# code_write_skills = ["/run"]           # skills only for code writing
+# writer_skills = ["/init"]              # fallback for all writer steps
+# reviewer_skills = ["/code-review"]     # fallback for all reviewer steps
 
 # [agents.codex]
 # model = "gpt-5.4"
-# writer_skills = ["$init"]
-# reviewer_skills = []
+# plan_write_skills = ["$init"]
+# code_write_skills = ["$run"]
 
 [prompts]
 

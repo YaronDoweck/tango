@@ -47,8 +47,8 @@ AGENT_MODELS = {
 }
 
 AGENT_SKILLS = {
-    "claude": {"writer": [], "reviewer": []},
-    "codex":  {"writer": [], "reviewer": []},
+    "claude": {},  # keys: tag (e.g. "plan_write") or role ("writer"/"reviewer")
+    "codex":  {},
 }
 
 VERDICT_SCHEMA = {
@@ -195,19 +195,17 @@ def load_prompts_config(script_dir):
         section = agents.get(agent_name, {})
         if section.get("model"):
             AGENT_MODELS[agent_name] = section["model"]
-        for role in ("writer", "reviewer"):
-            skills = section.get(f"{role}_skills", [])
-            if skills:
-                AGENT_SKILLS[agent_name][role] = skills
+        for key, val in section.items():
+            if key.endswith("_skills") and isinstance(val, list) and val:
+                AGENT_SKILLS[agent_name][key[:-len("_skills")]] = val
     loaded = []
     if prompts:
         loaded.append(f"{len(prompts)} prompt(s)")
     if any(AGENT_MODELS.values()):
         loaded.append("agent models: " + ", ".join(f"{k}={v}" for k, v in AGENT_MODELS.items() if v))
-    for agent_name, roles in AGENT_SKILLS.items():
-        for role, skills in roles.items():
-            if skills:
-                loaded.append(f"{agent_name} {role} skills: {skills}")
+    for agent_name, tags in AGENT_SKILLS.items():
+        for tag, skills in tags.items():
+            loaded.append(f"{agent_name} {tag} skills: {skills}")
     if loaded:
         print(f"[tango] loaded from {config_path.name}: {', '.join(loaded)}")
 
@@ -282,8 +280,9 @@ _dry_counters = {}       # (phase, tag) -> call count
 _dry_committed = set()   # phases where fake code-write happened
 
 
-def _inject_skills(prompt, agent, role):
-    skills = AGENT_SKILLS.get(agent, {}).get(role, [])
+def _inject_skills(prompt, agent, role, tag):
+    m = AGENT_SKILLS.get(agent, {})
+    skills = m.get(tag, m.get(role, []))  # tag-specific wins over role fallback
     if not skills:
         return prompt
     return "\n".join(skills) + "\n\n" + prompt
@@ -312,7 +311,7 @@ def _dry_print(label, agent, tag, n, prompt, extra=""):
 
 
 def call_writer(agent, prompt, cwd, phase, tag):
-    prompt = _inject_skills(prompt, agent, "writer")
+    prompt = _inject_skills(prompt, agent, "writer", tag)
     if DRY_RUN:
         n = _dry_inc(phase, tag)
         _dry_print("WRITER", agent, tag, n, prompt)
@@ -349,7 +348,7 @@ def call_writer(agent, prompt, cwd, phase, tag):
 
 
 def call_reviewer(agent, prompt, cwd, phase, tag, state_dir):
-    prompt = _inject_skills(prompt, agent, "reviewer")
+    prompt = _inject_skills(prompt, agent, "reviewer", tag)
     if DRY_RUN:
         n = _dry_inc(phase, tag)
         approve = n >= 3
