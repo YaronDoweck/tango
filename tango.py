@@ -171,8 +171,12 @@ _PROMPT_KEYS = {
 }
 
 
-def load_prompts_config(script_dir, config_override=None):
-    config_path = pathlib.Path(config_override).resolve() if config_override else pathlib.Path(script_dir) / "tango-prompts.toml"
+def load_prompts_config(script_dir, config_override=None, base_dir=None):
+    if config_override:
+        p = pathlib.Path(config_override)
+        config_path = (pathlib.Path(base_dir) / p).resolve() if (base_dir and not p.is_absolute()) else p.resolve()
+    else:
+        config_path = pathlib.Path(script_dir) / "tango-prompts.toml"
     if not config_path.exists():
         if config_override:
             sys.exit(f"Config file not found: {config_path}")
@@ -444,7 +448,8 @@ def find_phase_base_sha(cwd, phase):
 
 def resolve_plan(phase, plan_override, plans_dir, cwd):
     if plan_override:
-        p = pathlib.Path(plan_override).resolve()
+        p = pathlib.Path(plan_override)
+        p = (cwd / p).resolve() if not p.is_absolute() else p.resolve()
         if not p.exists():
             sys.exit(f"Plan file not found: {p}")
         return p
@@ -465,9 +470,10 @@ def resolve_plan(phase, plan_override, plans_dir, cwd):
     sys.exit(f"No plan file at {conventional} and no modified .md files found in git status.")
 
 
-def resolve_spec(phase, spec_override, phases_dir):
+def resolve_spec(phase, spec_override, phases_dir, cwd=None):
     if spec_override:
-        p = pathlib.Path(spec_override).resolve()
+        p = pathlib.Path(spec_override)
+        p = (cwd / p).resolve() if (cwd and not p.is_absolute()) else p.resolve()
         if not p.exists():
             if DRY_RUN:
                 p.parent.mkdir(parents=True, exist_ok=True)
@@ -509,7 +515,7 @@ def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir,
         print(f"[phase {phase}] plan already approved, skipping.")
         return True
 
-    phase_spec = resolve_spec(phase, spec_override, phases_dir)
+    phase_spec = resolve_spec(phase, spec_override, phases_dir, cwd)
     # Writer always saves to the conventional path; resolve_plan is used after write.
     write_plan_path = plans_dir / f"phase-{phase}.md"
     write_plan_path.parent.mkdir(parents=True, exist_ok=True)
@@ -565,7 +571,7 @@ def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_
         print(f"[phase {phase}] code already approved, skipping.")
         return True
 
-    phase_spec = resolve_spec(phase, spec_override, phases_dir)
+    phase_spec = resolve_spec(phase, spec_override, phases_dir, cwd)
     plan_path = resolve_plan(phase, plan_override, plans_dir, cwd)
 
     # Prefer git-history detection (survives restarts); fall back to stored state; else capture now.
@@ -663,13 +669,14 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="Simulate all steps without calling agents or committing. Shows prompts and state.")
     args = parser.parse_args()
-    load_prompts_config(script_dir, config_override=args.config)
 
     cwd = pathlib.Path(args.repo_dir).resolve()
     if not (cwd / ".git").exists():
         sys.exit(f"{cwd} doesn't look like a git repo root (no .git dir). "
                   f"Pass --repo-dir or set TANGO_REPO_DIR.")
     print(f"[tango] repo dir: {cwd}")
+
+    load_prompts_config(script_dir, config_override=args.config, base_dir=cwd)
 
     phases_dir = cwd / PHASES_DIR_NAME
     plans_dir = cwd / PLANS_DIR_NAME
