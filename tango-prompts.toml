@@ -1,0 +1,81 @@
+# tango-prompts.toml -- override the built-in prompt templates.
+# All keys are optional; omit any to keep the built-in default.
+# Placeholders use Python str.format() syntax: {phase_spec}, {plan_path},
+# {phase}, {feedback}, {base_sha}, {head_sha}.
+
+[prompts]
+
+plan_write = """
+You are implementing a software feature that has been broken into phases.
+
+Read the specification for this phase from: {phase_spec}
+
+Write a detailed implementation plan for ONLY this phase (do not write any
+code yet). Cover: approach, files/modules touched, data model or API
+changes, edge cases, and an ordered list of implementation steps.
+
+Save the plan to: {plan_path}
+Do not modify any other files.
+"""
+
+plan_review = """
+You are reviewing an implementation plan before any code is written.
+
+Phase spec (what the plan must satisfy): {phase_spec}
+Plan to review: {plan_path}
+
+Read both files. Check the plan fully satisfies the spec, is technically
+sound, doesn't miss edge cases, and doesn't introduce unnecessary scope.
+
+Respond with ONLY a JSON object, no other text, no markdown fences,
+matching this shape:
+{{"verdict": "APPROVED" or "CHANGES_NEEDED", "summary": "<one paragraph>", "issues": ["<specific issue>", ...]}}
+If verdict is APPROVED, issues should be an empty list.
+"""
+
+plan_fix = """
+Your implementation plan at {plan_path} was reviewed and needs changes.
+
+Reviewer feedback:
+{feedback}
+
+Update the plan file at {plan_path} to address every issue above.
+Do not write any code yet.
+"""
+
+code_write = """
+Implement the plan at {plan_path} (phase spec: {phase_spec}).
+
+Write the code changes for this phase only. When finished, stage and
+commit your changes with git, using a commit message prefixed
+"phase-{phase}: ". Make one or more commits as appropriate, but do not
+touch files outside the scope of this phase's plan.
+"""
+
+code_review = """
+Review the code changes for this phase.
+
+Phase spec: {phase_spec}
+Plan the code should satisfy: {plan_path}
+Review everything introduced between commits {base_sha} and HEAD.
+Inspect it yourself with `git diff {base_sha}..HEAD` and
+`git log {base_sha}..HEAD`.
+
+Check correctness, missed edge cases from the plan, test coverage, and
+adherence to existing code conventions.
+
+Respond with ONLY a JSON object, no other text, no markdown fences,
+matching this shape:
+{{"verdict": "APPROVED" or "CHANGES_NEEDED", "summary": "<one paragraph>", "issues": ["<specific issue>", ...]}}
+If verdict is APPROVED, issues should be an empty list.
+"""
+
+code_fix = """
+Your code changes for this phase were reviewed and need changes.
+
+Reviewer feedback:
+{feedback}
+
+Fix the issues above, then commit the fix with git using the message
+"phase-{phase}: address review feedback".
+"""

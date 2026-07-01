@@ -1,0 +1,77 @@
+# Run time
+.env
+logs/
+
+# Claude Code
+.claude/
+CLAUDE.md
+
+#codex
+.codex/
+AGENTS.md
+
+
+CHANGES.md
+HANDOFF.md
+SPR.md
+Tasks.md
+
+# Specs, plans, features (Claude-generated)
+features/
+plans/
+specs/
+docs/
+
+# Node (root-level MCP deps)
+node_modules/
+package.json
+package-lock.json
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Python tools
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.cover
+uv.lock
+
+# Git worktrees
+.worktrees/
+
+# macOS
+.DS_Store
+
+# SQLite databases (runtime + test artifacts)
+*.db
+*.db-shm
+*.db-wal
+bugs.json
+
+.vscode/
+
+# MCP tool data
+.serena/
+.agents/skills/impeccable/
+.impeccable/
