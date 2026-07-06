@@ -1,0 +1,152 @@
+# tango-prompts.toml -- full config reference for tango.
+# All keys are optional; omit any to keep built-in defaults.
+# CLI flags --claude-model / --codex-model override model keys here.
+#
+# Copy this file, uncomment what you need, and pass it with --config.
+#
+# Skills are slash-commands (/foo) or Codex skills ($foo) prepended to
+# the prompt before each agent call. Resolution order per step:
+#   tag-specific key (e.g. plan_write_skills) wins over role fallback
+#   (writer_skills for writer steps, reviewer_skills for reviewer steps).
+# Omit or comment out any key to skip skill injection for that step.
+
+# [agents.claude]
+# model = "claude-sonnet-4-6"             # default model for all steps
+# effort = "high"                         # default: low | medium | high | xhigh | max
+#
+# -- per-step model overrides --
+# plan_write_model  = "claude-opus-4-8"
+# plan_review_model = "claude-sonnet-4-6"
+# plan_fix_model    = "claude-sonnet-4-6"
+# code_write_model  = "claude-opus-4-8"
+# code_review_model = "claude-sonnet-4-6"
+# code_fix_model    = "claude-sonnet-4-6"
+#
+# -- per-step effort overrides --
+# plan_write_effort  = "high"
+# plan_review_effort = "medium"
+# plan_fix_effort    = "medium"
+# code_write_effort  = "max"
+# code_review_effort = "medium"
+# code_fix_effort    = "medium"
+#
+# -- skills (slash-commands prepended to prompt) --
+# writer_skills   = ["/init"]             # fallback for all writer steps
+# reviewer_skills = ["/code-review"]      # fallback for all reviewer steps
+# plan_write_skills  = ["/init", "/spr"]  # overrides writer_skills for plan_write
+# plan_review_skills = ["/code-review"]   # overrides reviewer_skills for plan_review
+# plan_fix_skills    = ["/init"]
+# code_write_skills  = ["/run"]           # overrides writer_skills for code_write
+# code_review_skills = ["/code-review"]   # overrides reviewer_skills for code_review
+# code_fix_skills    = ["/run"]
+
+# [agents.codex]
+# model = "gpt-5.5"
+# effort = "high"                         # default: low | medium | high (model_reasoning_effort)
+#
+# -- per-step model overrides --
+# plan_write_model  = "o3"
+# plan_review_model = "gpt-5.4"
+# plan_fix_model    = "gpt-5.4"
+# code_write_model  = "o3"
+# code_review_model = "gpt-5.4"
+# code_fix_model    = "gpt-5.4"
+#
+# -- per-step effort overrides --
+# plan_write_effort  = "high"
+# plan_review_effort = "medium"
+# plan_fix_effort    = "medium"
+# code_write_effort  = "high"
+# code_review_effort = "medium"
+# code_fix_effort    = "low"
+#
+# -- skills (Codex skill names prepended to prompt) --
+# writer_skills      = ["$init"]
+# reviewer_skills    = ["$review"]
+# plan_write_skills  = ["$init"]          # overrides writer_skills for plan_write
+# plan_review_skills = ["$review"]
+# plan_fix_skills    = ["$init"]
+# code_write_skills  = ["$run"]           # overrides writer_skills for code_write
+# code_review_skills = ["$review"]
+# code_fix_skills    = ["$run"]
+
+[prompts]
+
+plan_write = """
+You are implementing a software feature that has been broken into phases.
+
+Spec file (may contain all phases): {phase_spec}
+Current phase: {phase}
+
+Read the spec. If it covers multiple phases, focus ONLY on phase '{phase}'.
+Write a detailed implementation plan for ONLY this phase (do not write any
+code yet). Cover: approach, files/modules touched, data model or API
+changes, edge cases, and an ordered list of implementation steps.
+
+Save the plan to: {plan_path}
+Do not modify any other files.
+"""
+
+plan_review = """
+You are reviewing an implementation plan before any code is written.
+
+Spec file (may contain all phases): {phase_spec}
+Current phase: {phase}
+Plan to review: {plan_path}
+
+Read both files. If the spec covers multiple phases, evaluate the plan only
+against the requirements for phase '{phase}'. Check the plan fully satisfies
+those requirements, is technically sound, doesn't miss edge cases, and
+doesn't introduce unnecessary scope.
+
+Respond with ONLY a JSON object, no other text, no markdown fences,
+matching this shape:
+{{"verdict": "APPROVED" or "CHANGES_NEEDED", "summary": "<one paragraph>", "issues": [{{"severity": "HIGH"|"MEDIUM"|"LOW", "description": "<specific issue>"}}]}}
+If verdict is APPROVED, issues should be an empty list.
+"""
+
+plan_fix = """
+Your implementation plan at {plan_path} was reviewed and needs changes.
+
+Reviewer feedback:
+{feedback}
+
+Update the plan file at {plan_path} to address every issue above.
+Do not write any code yet.
+"""
+
+code_write = """
+Implement the plan at {plan_path} (phase spec: {phase_spec}).
+
+Write the code changes for this phase only. When finished, stage and
+commit your changes with git. Make one or more commits as appropriate,
+but do not touch files outside the scope of this phase's plan.
+"""
+
+code_review = """
+Review the code changes for this phase.
+
+Phase spec: {phase_spec}
+Plan the code should satisfy: {plan_path}
+Review everything introduced between commits {base_sha} and HEAD.
+Inspect it yourself with `git diff {base_sha}..HEAD` and
+`git log {base_sha}..HEAD`.
+
+Check correctness, missed edge cases from the plan, test coverage, and
+adherence to existing code conventions.
+
+Respond with ONLY a JSON object, no other text, no markdown fences,
+matching this shape:
+{{"verdict": "APPROVED" or "CHANGES_NEEDED", "summary": "<one paragraph>", "issues": [{{"severity": "HIGH"|"MEDIUM"|"LOW", "description": "<specific issue>"}}]}}
+If verdict is APPROVED, issues should be an empty list.
+"""
+
+code_fix = """
+Your code changes for this phase were reviewed and need changes.
+
+Reviewer feedback:
+{feedback}
+
+Fix the issues above, then commit the fix with git using the message
+"phase-{phase}: address review feedback".
+"""

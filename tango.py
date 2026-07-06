@@ -42,14 +42,29 @@ PLANS_DIR_NAME = "plans"  # <repo>/plans/phase-<N>.md -- plan output, agents wri
 STATE_DIR_NAME = ".agent-workflow"  # <repo>/.agent-workflow -- logs + scratch files
 
 AGENT_MODELS = {
-    "claude": None,  # None = let the CLI use its own default
-    "codex": None,
+    "claude": {},  # "" key = default; tag key (e.g. "code_write") = override
+    "codex": {},
 }
+
+AGENT_EFFORTS = {
+    "claude": {},  # "" key = default; tag key = override
+    "codex": {},
+}
+
+
+def _resolve(mapping, agent, tag):
+    """Return tag-specific value if set, else default, else None."""
+    m = mapping.get(agent, {})
+    return m.get(tag) or m.get("") or None
 
 AGENT_SKILLS = {
     "claude": {},  # keys: tag (e.g. "plan_write") or role ("writer"/"reviewer")
     "codex":  {},
 }
+
+RESUME_CLAUDE = None   # --resume-claude <session_id>
+RESUME_CODEX = None    # --resume-codex <thread_id>
+SESSION_FILE = None    # set in main to {state_dir}/sessions.json
 
 VERDICT_SCHEMA = {
     "type": "object",
@@ -124,13 +139,12 @@ CODE_WRITE_PROMPT = """\
 Implement the plan at {plan_path} (phase spec: {phase_spec}).
 
 Write the code changes for this phase only. When finished, stage and
-commit your changes with git, using a commit message prefixed
-"phase-{phase}: ". Make one or more commits as appropriate, but do not
-touch files outside the scope of this phase's plan.
+commit your changes with git. Make one or more commits as appropriate,
+but do not touch files outside the scope of this phase's plan.
 """
 
 CODE_REVIEW_PROMPT = """\
-Review the code changes for this phase.
+Review the code changes for phase {phase}.
 
 Phase spec: {phase_spec}
 Plan the code should satisfy: {plan_path}
@@ -200,9 +214,15 @@ def load_prompts_config(script_dir, config_override=None, base_dir=None):
     for agent_name in ("claude", "codex"):
         section = agents.get(agent_name, {})
         if section.get("model"):
-            AGENT_MODELS[agent_name] = section["model"]
+            AGENT_MODELS[agent_name][""] = section["model"]
+        if section.get("effort"):
+            AGENT_EFFORTS[agent_name][""] = section["effort"]
         for key, val in section.items():
-            if key.endswith("_skills") and isinstance(val, list) and val:
+            if key.endswith("_model") and val:
+                AGENT_MODELS[agent_name][key[:-len("_model")]] = val
+            elif key.endswith("_effort") and val:
+                AGENT_EFFORTS[agent_name][key[:-len("_effort")]] = val
+            elif key.endswith("_skills") and isinstance(val, list) and val:
                 AGENT_SKILLS[agent_name][key[:-len("_skills")]] = val
     loaded = []
     if prompts:
@@ -222,7 +242,8 @@ def load_prompts_config(script_dir, config_override=None, base_dir=None):
 
 
 def _popen(cmd, cwd):
-    return subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL, text=True)
 
 
 def _stream_print(label, text):
@@ -230,14 +251,33 @@ def _stream_print(label, text):
         print(f"[{label}] {text}", end="", flush=True)
 
 
-def run_claude(prompt, cwd, allowed_tools, permission_mode="bypassPermissions"):
+def _save_session(agent, session_id):
+    if not SESSION_FILE or not session_id:
+        return
+    try:
+        data = json.loads(SESSION_FILE.read_text()) if SESSION_FILE.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        data = {}
+    data[agent] = session_id
+    data["updated"] = datetime.datetime.now().isoformat(timespec="seconds")
+    SESSION_FILE.write_text(json.dumps(data, indent=2))
+    resume_cmd = (f"claude --resume {session_id}" if agent == "claude"
+                  else f"codex exec resume {session_id} '<prompt>'")
+    print(f"\n[tango] {agent} session_id={session_id}  resume: {resume_cmd}")
+
+
+def run_claude(prompt, cwd, allowed_tools, permission_mode="bypassPermissions", tag=""):
     fmt = "stream-json" if STREAM else "json"
     cmd = ["claude", "-p", prompt,
            "--output-format", fmt,
            "--allowedTools", allowed_tools,
            "--permission-mode", permission_mode]
-    if AGENT_MODELS["claude"]:
-        cmd += ["--model", AGENT_MODELS["claude"]]
+    if RESUME_CLAUDE:
+        cmd += ["--resume", RESUME_CLAUDE]
+    if model := _resolve(AGENT_MODELS, "claude", tag):
+        cmd += ["--model", model]
+    if effort := _resolve(AGENT_EFFORTS, "claude", tag):
+        cmd += ["--effort", effort]
 
     if STREAM:
         cmd += ["--verbose"]
@@ -249,7 +289,9 @@ def run_claude(prompt, cwd, allowed_tools, permission_mode="bypassPermissions"):
                 evt = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if evt.get("type") == "assistant":
+            if evt.get("type") == "system" and evt.get("subtype") == "init":
+                _save_session("claude", evt.get("session_id"))
+            elif evt.get("type") == "assistant":
                 for block in evt.get("message", {}).get("content", []):
                     if block.get("type") == "text":
                         _stream_print("claude", block["text"])
@@ -262,39 +304,48 @@ def run_claude(prompt, cwd, allowed_tools, permission_mode="bypassPermissions"):
             raise RuntimeError(f"claude exited {proc.returncode}\nSTDERR:\n{stderr[-2000:]}")
         return result
 
-    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, stdin=subprocess.DEVNULL)
     if proc.returncode != 0:
         raise RuntimeError(f"claude exited {proc.returncode}\nSTDERR:\n{proc.stderr[-2000:]}")
     data = json.loads(proc.stdout)
     return data.get("result", "")
 
 
-def run_codex(prompt, cwd, sandbox="workspace-write", schema_path=None, out_path=None):
-    cmd = ["codex", "exec", prompt, "--json", "--sandbox", sandbox]
+def run_codex(prompt, cwd, sandbox="workspace-write", schema_path=None, out_path=None, tag=""):
+    if RESUME_CODEX:
+        cmd = ["codex", "exec", "resume", RESUME_CODEX, prompt, "--json", "--sandbox", sandbox]
+    else:
+        cmd = ["codex", "exec", prompt, "--json", "--sandbox", sandbox]
     if sandbox == "read-only":
         # ponytail: unknown exact key — adjust if codex prompts for confirmation.
         cmd += ["-c", "approval_policy=\"never\""]
     else:
         # Note: also bypasses sandbox restriction (known limitation).
         cmd += ["--dangerously-bypass-approvals-and-sandbox"]
-    if AGENT_MODELS["codex"]:
-        cmd += ["--model", AGENT_MODELS["codex"]]
+    if model := _resolve(AGENT_MODELS, "codex", tag):
+        cmd += ["--model", model]
+    if effort := _resolve(AGENT_EFFORTS, "codex", tag):
+        cmd += ["-c", f"model_reasoning_effort=\"{effort}\""]
     if schema_path:
         cmd += ["--output-schema", str(schema_path)]
     if out_path:
         cmd += ["-o", str(out_path)]
 
+    def _codex_agent_text(evt):
+        """Extract agent message text from a codex JSON event."""
+        if evt.get("type") == "item.completed":
+            item = evt.get("item", {})
+            if item.get("type") == "agent_message":
+                return item.get("text", "")
+        return ""
+
     def _parse_codex_jsonl(lines):
         text = ""
         for line in lines:
             try:
-                evt = json.loads(line)
+                text += _codex_agent_text(json.loads(line))
             except json.JSONDecodeError:
-                continue
-            method = str(evt.get("method", ""))
-            if "agentMessage" in method:
-                params = evt.get("params", {})
-                text += params.get("delta") or params.get("message") or ""
+                pass
         return text
 
     if STREAM:
@@ -307,10 +358,10 @@ def run_codex(prompt, cwd, sandbox="workspace-write", schema_path=None, out_path
                 evt = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            method = str(evt.get("method", ""))
-            if "agentMessage" in method:
-                params = evt.get("params", {})
-                chunk = params.get("delta") or params.get("message") or ""
+            if evt.get("type") == "thread.started":
+                _save_session("codex", evt.get("thread_id"))
+            chunk = _codex_agent_text(evt)
+            if chunk:
                 _stream_print("codex", chunk)
         stderr = proc.stderr.read()
         proc.wait()
@@ -321,9 +372,17 @@ def run_codex(prompt, cwd, sandbox="workspace-write", schema_path=None, out_path
             return out_path.read_text()
         return _parse_codex_jsonl(lines)
 
-    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, stdin=subprocess.DEVNULL)
     if proc.returncode != 0:
         raise RuntimeError(f"codex exited {proc.returncode}\nSTDERR:\n{proc.stderr[-2000:]}")
+    for line in proc.stdout.splitlines():
+        try:
+            evt = json.loads(line)
+            if evt.get("type") == "thread.started":
+                _save_session("codex", evt.get("thread_id"))
+                break
+        except json.JSONDecodeError:
+            pass
     if out_path:
         return out_path.read_text()
     return _parse_codex_jsonl(proc.stdout.splitlines())
@@ -335,12 +394,16 @@ def extract_json(text):
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    start, end = text.find("{"), text.rfind("}")
-    if start != -1 and end != -1 and end > start:
+    end = text.rfind("}")
+    pos = 0
+    while True:
+        start = text.find("{", pos)
+        if start == -1 or end == -1 or end <= start:
+            break
         try:
             return json.loads(text[start:end + 1])
         except json.JSONDecodeError:
-            pass
+            pos = start + 1
     raise ValueError(f"Could not parse a JSON verdict from response:\n{text[:800]}")
 
 
@@ -412,9 +475,9 @@ def call_writer(agent, prompt, cwd, phase, tag):
         return response
 
     if agent == "claude":
-        text = run_claude(prompt, cwd, allowed_tools="Read,Edit,Write,Bash,Skill", permission_mode="bypassPermissions")
+        text = run_claude(prompt, cwd, allowed_tools="Read,Edit,Write,Bash,Skill", permission_mode="bypassPermissions", tag=tag)
     elif agent == "codex":
-        text = run_codex(prompt, cwd, sandbox="workspace-write")
+        text = run_codex(prompt, cwd, sandbox="workspace-write", tag=tag)
     else:
         sys.exit(f"Unknown writer agent: {agent}")
     log(tag, phase, agent, prompt, text)
@@ -442,13 +505,13 @@ def call_reviewer(agent, prompt, cwd, phase, tag, state_dir):
         # Read-only + narrow git inspection commands; verify this permission-rule
         # syntax against `claude -p --help` on your installed version.
         allowed = "Read,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(cat *),Skill"
-        text = run_claude(prompt, cwd, allowed_tools=allowed, permission_mode="bypassPermissions")
+        text = run_claude(prompt, cwd, allowed_tools=allowed, permission_mode="bypassPermissions", tag=tag)
         log(tag, phase, agent, prompt, text)
         return extract_json(text)
     elif agent == "codex":
         out_path = state_dir / f"verdict-{tag}-{phase}-{int(time.time() * 1000)}.json"
         schema_path = state_dir / "verdict-schema.json"
-        text = run_codex(prompt, cwd, sandbox="read-only", schema_path=schema_path, out_path=out_path)
+        text = run_codex(prompt, cwd, sandbox="read-only", schema_path=schema_path, out_path=out_path, tag=tag)
         log(tag, phase, agent, prompt, text)
         return json.loads(text)
     else:
@@ -499,19 +562,47 @@ def git_advanced(cwd, before_sha, phase=None):
     return get_head(cwd) != before_sha
 
 
-def find_phase_base_sha(cwd, phase):
-    """Parent of the earliest commit whose message starts with 'phase-{phase}:'."""
-    r = subprocess.run(
-        ["git", "log", "--format=%H", f"--grep=^phase-{phase}:"],
-        cwd=cwd, capture_output=True, text=True, check=True,
-    )
-    shas = [s for s in r.stdout.strip().splitlines() if s]
-    if not shas:
-        return None
-    earliest = shas[-1]
-    r2 = subprocess.run(["git", "rev-parse", f"{earliest}^"],
-                        cwd=cwd, capture_output=True, text=True)
-    return r2.stdout.strip() if r2.returncode == 0 else earliest
+def merge_writer_worktrees(cwd, base_sha):
+    """Merge any worktree branches that have commits past base_sha into cwd's current branch."""
+    r = subprocess.run(["git", "worktree", "list", "--porcelain"],
+                       cwd=cwd, capture_output=True, text=True, check=True)
+    worktrees = []
+    cur = {}
+    for line in r.stdout.splitlines():
+        if line.startswith("worktree "):
+            cur = {"path": line[9:]}
+        elif line.startswith("HEAD "):
+            cur["sha"] = line[5:]
+        elif line.startswith("branch "):
+            cur["branch"] = line[7:]
+        elif line == "" and cur:
+            if cur.get("path") != str(cwd):
+                worktrees.append(cur)
+            cur = {}
+    if cur and cur.get("path") != str(cwd):
+        worktrees.append(cur)
+
+    merged = []
+    for wt in worktrees:
+        sha = wt.get("sha", "")
+        branch_ref = wt.get("branch", "")
+        if not sha or not branch_ref:
+            continue
+        r2 = subprocess.run(["git", "log", "--oneline", f"{base_sha}..{sha}"],
+                             cwd=cwd, capture_output=True, text=True)
+        if r2.returncode != 0 or not r2.stdout.strip():
+            continue
+        branch = branch_ref.replace("refs/heads/", "")
+        print(f"[tango] merging worktree branch '{branch}' ({sha[:7]}) into current branch.")
+        mr = subprocess.run(
+            ["git", "merge", "--no-ff", branch, "-m", f"Merge worktree branch {branch}"],
+            cwd=cwd, capture_output=True, text=True,
+        )
+        if mr.returncode != 0:
+            raise RuntimeError(f"Failed to merge worktree branch '{branch}':\n{mr.stderr}")
+        merged.append(branch)
+    return merged
+
 
 
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".eggs"}
@@ -652,7 +743,7 @@ def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir,
     return False
 
 
-def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir, state_dir, spec_override=None, plan_override=None):
+def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir, state_dir, spec_override=None, plan_override=None, base_sha_override=None):
     state = load_state(state_dir, phase)
 
     if state.get("code_approved"):
@@ -662,22 +753,20 @@ def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_
     phase_spec = resolve_spec(phase, spec_override, phases_dir, cwd)
     plan_path = resolve_plan(phase, plan_override, plans_dir, cwd)
 
-    # Prefer git-history detection (survives restarts); fall back to stored state; else capture now.
-    git_base = find_phase_base_sha(cwd, phase)
-    base_sha = git_base or state.get("base_sha")
-    if base_sha:
-        if "base_sha" not in state or state["base_sha"] != base_sha:
-            state["base_sha"] = base_sha
-            save_state(state_dir, phase, state)
-        src = "git history" if git_base else "saved state"
-        print(f"[phase {phase}] base_sha {base_sha[:7]} (from {src}).")
+    # base_sha is captured once before first write and persisted; no commit prefix required.
+    if base_sha_override:
+        base_sha = base_sha_override
+        state["base_sha"] = base_sha
+        save_state(state_dir, phase, state)
+        print(f"[phase {phase}] base_sha set to {base_sha[:7]} (from --base-sha).")
+    elif state.get("base_sha"):
+        base_sha = state["base_sha"]
+        print(f"[phase {phase}] base_sha {base_sha[:7]} (from saved state).")
     else:
         base_sha = get_head(cwd)
         state["base_sha"] = base_sha
         save_state(state_dir, phase, state)
-        print(f"[phase {phase}] WARNING: no commits with 'phase-{phase}:' prefix found. "
-              f"base_sha set to current HEAD ({base_sha[:7]}). "
-              f"Ensure writer uses 'phase-{phase}: ' commit prefix so reviews cover all phase work.")
+        print(f"[phase {phase}] base_sha set to HEAD ({base_sha[:7]}).")
 
     if git_advanced(cwd, base_sha, phase=phase):
         print(f"[phase {phase}] commits exist past base_sha, skipping write step.")
@@ -687,6 +776,8 @@ def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_
             CODE_WRITE_PROMPT.format(plan_path=plan_path, phase_spec=phase_spec, phase=phase),
             cwd, phase, "code_write",
         )
+        if not DRY_RUN:
+            merge_writer_worktrees(cwd, base_sha)
         if not git_advanced(cwd, base_sha, phase=phase):
             sys.exit(f"{writer} did not commit anything for phase {phase}. Check {LOG_DIR} and fix manually.")
 
@@ -698,7 +789,7 @@ def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_
         head_sha = get_head(cwd)
         verdict = call_reviewer(
             reviewer,
-            CODE_REVIEW_PROMPT.format(phase_spec=phase_spec, plan_path=plan_path,
+            CODE_REVIEW_PROMPT.format(phase=phase, phase_spec=phase_spec, plan_path=plan_path,
                                        base_sha=base_sha, head_sha=head_sha),
             cwd, phase, "code_review", state_dir,
         )
@@ -717,6 +808,8 @@ def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_
             CODE_FIX_PROMPT.format(feedback=feedback, phase=phase),
             cwd, phase, "code_fix",
         )
+        if not DRY_RUN:
+            merge_writer_worktrees(cwd, pre_fix_sha)
         if not git_advanced(cwd, pre_fix_sha, phase=phase):
             print(f"[phase {phase}] WARNING: {writer} made no fix commit -- next review will likely repeat.")
         state["code_fix_iter"] = abs_iter
@@ -753,11 +846,23 @@ def main():
     parser.add_argument("--config", default=None, help="Path to config TOML file (default: tango-prompts.toml next to script).")
     parser.add_argument("--claude-model", default=None, help="Model for claude agent (e.g. claude-opus-4-8).")
     parser.add_argument("--codex-model", default=None, help="Model for codex agent (e.g. o4-mini).")
+    parser.add_argument("--claude-effort", default=None,
+                        choices=["low", "medium", "high", "xhigh", "max"],
+                        help="Effort level for claude (low/medium/high/xhigh/max).")
+    parser.add_argument("--codex-effort", default=None,
+                        choices=["low", "medium", "high"],
+                        help="Reasoning effort for codex (low/medium/high).")
+    parser.add_argument("--base-sha", default=None, metavar="SHA",
+                        help="Override base commit for the implement step (skips write if commits already exist past SHA).")
     parser.add_argument("--reset", action="store_true", help="Clear saved state for this phase and start fresh.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Simulate all steps without calling agents or committing. Shows prompts and state.")
     parser.add_argument("--stream", action="store_true",
                         help="Print agent output in real-time as it arrives.")
+    parser.add_argument("--resume-claude", default=None, metavar="SESSION_ID",
+                        help="Resume a previous claude session by ID (from sessions.json).")
+    parser.add_argument("--resume-codex", default=None, metavar="THREAD_ID",
+                        help="Resume a previous codex session by thread ID (from sessions.json).")
     args = parser.parse_args()
 
     cwd = pathlib.Path(args.repo_dir).resolve()
@@ -775,14 +880,29 @@ def main():
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "verdict-schema.json").write_text(json.dumps(VERDICT_SCHEMA, indent=2))
 
+    global RESUME_CLAUDE, RESUME_CODEX, SESSION_FILE
+    SESSION_FILE = state_dir / "sessions.json"
+    if args.resume_claude:
+        RESUME_CLAUDE = args.resume_claude
+        print(f"[tango] resuming claude session: {RESUME_CLAUDE}")
+    if args.resume_codex:
+        RESUME_CODEX = args.resume_codex
+        print(f"[tango] resuming codex thread: {RESUME_CODEX}")
+
     if args.claude_model:
-        AGENT_MODELS["claude"] = args.claude_model
+        AGENT_MODELS["claude"][""] = args.claude_model
     if args.codex_model:
-        AGENT_MODELS["codex"] = args.codex_model
-    if any(AGENT_MODELS.values()):
-        for k, v in AGENT_MODELS.items():
-            if v:
-                print(f"[tango] {k} model: {v}")
+        AGENT_MODELS["codex"][""] = args.codex_model
+    if any(m for m in AGENT_MODELS.values()):
+        for k, m in AGENT_MODELS.items():
+            if m:
+                print(f"[tango] {k} model(s): {m}")
+    if args.claude_effort:
+        AGENT_EFFORTS["claude"][""] = args.claude_effort
+        print(f"[tango] claude effort: {args.claude_effort}")
+    if args.codex_effort:
+        AGENT_EFFORTS["codex"][""] = args.codex_effort
+        print(f"[tango] codex reasoning effort: {args.codex_effort}")
 
     if args.stream:
         STREAM = True
@@ -806,7 +926,8 @@ def main():
             sys.exit(1)
     if args.step in ("implement", "phase"):
         ok = run_implementing(args.phase, args.writer, args.reviewer, cwd, args.max_iters,
-                               phases_dir, plans_dir, state_dir, spec_override=args.spec, plan_override=args.plan)
+                               phases_dir, plans_dir, state_dir, spec_override=args.spec, plan_override=args.plan,
+                               base_sha_override=args.base_sha)
         if not ok:
             sys.exit(1)
 
