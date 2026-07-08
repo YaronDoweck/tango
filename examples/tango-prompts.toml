@@ -45,10 +45,10 @@
 # effort = "high"                         # default: low | medium | high (model_reasoning_effort)
 #
 # -- per-step model overrides --
-# plan_write_model  = "o3"
+# plan_write_model  = "gpt-5.5"
 # plan_review_model = "gpt-5.4"
 # plan_fix_model    = "gpt-5.4"
-# code_write_model  = "o3"
+# code_write_model  = "gpt-5.5"
 # code_review_model = "gpt-5.4"
 # code_fix_model    = "gpt-5.4"
 #

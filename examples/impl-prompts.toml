@@ -7,7 +7,7 @@
 # code_write_skills = ["/run"]
 
 [agents.codex]
-# code_write_model  = "o3"
+# code_write_model  = "gpt-5.5"
 # code_write_skills = ["$run"]
 
 [prompts]
