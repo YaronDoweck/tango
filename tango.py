@@ -504,7 +504,7 @@ def call_reviewer(agent, prompt, cwd, phase, tag, state_dir):
     if agent == "claude":
         # Read-only + narrow git inspection commands; verify this permission-rule
         # syntax against `claude -p --help` on your installed version.
-        allowed = "Read,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(cat *),Skill"
+        allowed = "Read,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(cat *),Bash(*sed -n *),Skill"
         text = run_claude(prompt, cwd, allowed_tools=allowed, permission_mode="bypassPermissions", tag=tag)
         log(tag, phase, agent, prompt, text)
         return extract_json(text)
@@ -857,8 +857,8 @@ def main():
     parser.add_argument("--reset", action="store_true", help="Clear saved state for this phase and start fresh.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Simulate all steps without calling agents or committing. Shows prompts and state.")
-    parser.add_argument("--stream", action="store_true",
-                        help="Print agent output in real-time as it arrives.")
+    parser.add_argument("--no-stream", dest="stream", action="store_false", default=True,
+                        help="Disable real-time agent output (streaming is on by default).")
     parser.add_argument("--resume-claude", default=None, metavar="SESSION_ID",
                         help="Resume a previous claude session by ID (from sessions.json).")
     parser.add_argument("--resume-codex", default=None, metavar="THREAD_ID",
@@ -907,6 +907,8 @@ def main():
     if args.stream:
         STREAM = True
         print("[tango] streaming mode: agent output printed in real-time.")
+    else:
+        print("[tango] streaming disabled (--no-stream).")
 
     if args.dry_run:
         DRY_RUN = True
