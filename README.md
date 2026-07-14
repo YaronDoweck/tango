@@ -232,6 +232,91 @@ Use **`--dry-run`** when introducing Tango to a new repo: it walks the full loop
 with stub prompts and fake verdicts so you can see the flow without spending
 tokens or changing files.
 
+## Local HTTP server
+
+Running `python tango.py` with no positional command starts a local HTTP
+server instead of a workflow. External tools (bots, dashboards, scripts) can
+use it to start/watch/stop/retry Tango jobs without holding a terminal open.
+Each job runs the normal `tango.py plan|implement|phase` CLI as an isolated
+subprocess — the server is a thin scheduler and HTTP wrapper, not a new
+execution path.
+
+```bash
+python tango.py
+# [tango-server] listening on http://127.0.0.1:8765
+```
+
+### Server flags
+
+| Flag                  | Purpose                                              |
+|------------------------|-------------------------------------------------------|
+| `--host`               | Bind address. Default `127.0.0.1`.                    |
+| `--port`                | Bind port. Default `8765`.                            |
+| `--jobs-dir`            | Where job state/logs are persisted. Default `~/.tango/jobs`. |
+| `--max-concurrent`      | Global cap on simultaneously running jobs. Default `1`. |
+| `--allowed-repo`        | Repeatable. Restrict which repos jobs may target. Default: any local Git repo. |
+
+Server flags and workflow flags (`--writer`, `--phase`, etc.) are mutually
+exclusive — mixing them is a startup error.
+
+**Security note:** this API can launch coding agents with write access to
+whatever repository a caller points it at. Bind only to `127.0.0.1` (the
+default) unless you understand the exposure, and use `--allowed-repo` to
+restrict targets if the server is reachable by more than you.
+
+### Discovering the API
+
+`GET /help` returns the full request schema and endpoint list — the source of
+truth for what fields a job submission accepts, generated from the same
+schema the server validates against.
+
+```bash
+curl -s http://127.0.0.1:8765/help
+```
+
+### Running a job
+
+```bash
+# Start a job (same options as the CLI, as JSON)
+curl -s -X POST http://127.0.0.1:8765/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"step":"phase","phase":"3","writer":"claude","reviewer":"codex","repo_dir":"/path/to/repo"}'
+# -> 202 {"id":"job-20260101-120000-a81f","status":"queued","status_url":"...","logs_url":"..."}
+
+# Poll status
+curl -s http://127.0.0.1:8765/jobs/job-20260101-120000-a81f/status
+
+# Read logs incrementally (combined stdout/stderr)
+curl -s "http://127.0.0.1:8765/jobs/job-20260101-120000-a81f/logs?offset=0"
+
+# Stop a queued or running job (idempotent)
+curl -s -X POST http://127.0.0.1:8765/jobs/job-20260101-120000-a81f/stop
+
+# Retry a finished (failed/stopped/succeeded) job — gets a new job id
+curl -s -X POST http://127.0.0.1:8765/jobs/job-20260101-120000-a81f/retry \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+`repo_dir` must point into a Git repository; the server resolves it to the
+canonical repository root and uses that root as the concurrency unit — two
+jobs targeting the same repo never run at the same time, but jobs in
+different repos run in parallel up to `--max-concurrent`.
+
+### Non-interactive auth
+
+Jobs run as subprocesses of the server process, so make sure `claude`/`codex`
+CLI auth is already configured in the environment the server itself runs in
+(same as running `tango.py` directly) — the server does not prompt for login.
+
+### Shutdown and persistence
+
+`Ctrl-C` (or `SIGTERM`) stops the server gracefully: active jobs are sent
+`SIGTERM`, given a grace period, then `SIGKILL`'d if still alive. Job state
+(`request.json`, `status.json`, `output.log`) lives under `--jobs-dir` and
+survives restarts — queued jobs resume, and jobs that were `running` when the
+server died come back as `interrupted` (never re-signalled, since the old PID
+may have been reused by an unrelated process).
+
 ## Configuration
 
 All prompts and model settings are optional — built-in defaults work out of the

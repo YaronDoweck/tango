@@ -41,6 +41,14 @@ PHASES_DIR_NAME = "phases"  # default dir for spec files (overridden by --spec)
 PLANS_DIR_NAME = "plans"  # <repo>/plans/phase-<N>.md -- plan output, agents write these
 STATE_DIR_NAME = ".agent-workflow"  # <repo>/.agent-workflow -- logs + scratch files
 
+# Shared with tango_server.py — server imports these for /help and request validation.
+AGENT_NAMES = ("claude", "codex")
+CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+CODEX_EFFORTS = ("low", "medium", "high")
+MAX_ITERS_DEFAULT = 5
+MAX_ITERS_MIN = 1
+MAX_ITERS_MAX = 100
+
 AGENT_MODELS = {
     "claude": {},  # "" key = default; tag key (e.g. "code_write") = override
     "codex": {},
@@ -832,26 +840,35 @@ def main():
     script_dir = pathlib.Path(__file__).parent
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("step", choices=["plan", "implement", "phase"])
-    parser.add_argument("--phase", required=True,
+    parser.add_argument("step", nargs="?", default=None, choices=["plan", "implement", "phase"],
+                        help="Workflow command. Omit to start the local HTTP server.")
+    # Server-only flags
+    parser.add_argument("--host", default=None, help="[server] Interface to bind (default 127.0.0.1).")
+    parser.add_argument("--port", type=int, default=None, help="[server] TCP port (default 8765).")
+    parser.add_argument("--jobs-dir", default=None, help="[server] Jobs persistence directory (default ~/.tango/jobs).")
+    parser.add_argument("--max-concurrent", type=int, default=None, help="[server] Max concurrent jobs (default 1).")
+    parser.add_argument("--allowed-repo", action="append", default=None,
+                        help="[server] Allow this repo root (repeatable). If set, submissions must match.")
+    # Workflow flags
+    parser.add_argument("--phase", default=None,
                         help="Phase identifier (used for naming, state, and commit-message grep).")
     parser.add_argument("--spec", default=None,
                         help="Path to spec file. Overrides the default phases/phase-<N>.md lookup.")
     parser.add_argument("--plan", default=None,
                         help="Path to plan file for the reviewer. Auto-detected by mtime scan if omitted.")
-    parser.add_argument("--writer", required=True, choices=["claude", "codex"])
-    parser.add_argument("--reviewer", required=True, choices=["claude", "codex"])
+    parser.add_argument("--writer", default=None, choices=list(AGENT_NAMES))
+    parser.add_argument("--reviewer", default=None, choices=list(AGENT_NAMES))
     parser.add_argument("--repo-dir", default=os.environ.get("TANGO_REPO_DIR", "."))
-    parser.add_argument("--max-iters", type=int, default=5)
+    parser.add_argument("--max-iters", type=int, default=MAX_ITERS_DEFAULT)
     parser.add_argument("--config", default=None, help="Path to config TOML file (default: tango-prompts.toml next to script).")
     parser.add_argument("--claude-model", default=None, help="Model for claude agent (e.g. claude-opus-4-8).")
     parser.add_argument("--codex-model", default=None, help="Model for codex agent (e.g. o4-mini).")
     parser.add_argument("--claude-effort", default=None,
-                        choices=["low", "medium", "high", "xhigh", "max"],
-                        help="Effort level for claude (low/medium/high/xhigh/max).")
+                        choices=list(CLAUDE_EFFORTS),
+                        help="Effort level for claude.")
     parser.add_argument("--codex-effort", default=None,
-                        choices=["low", "medium", "high"],
-                        help="Reasoning effort for codex (low/medium/high).")
+                        choices=list(CODEX_EFFORTS),
+                        help="Reasoning effort for codex.")
     parser.add_argument("--base-sha", default=None, metavar="SHA",
                         help="Override base commit for the implement step (skips write if commits already exist past SHA).")
     parser.add_argument("--reset", action="store_true", help="Clear saved state for this phase and start fresh.")
@@ -862,8 +879,36 @@ def main():
     parser.add_argument("--resume-claude", default=None, metavar="SESSION_ID",
                         help="Resume a previous claude session by ID (from sessions.json).")
     parser.add_argument("--resume-codex", default=None, metavar="THREAD_ID",
-                        help="Resume a previous codex session by thread ID (from sessions.json).")
+                        help="Resume a previous codex session by ID (from sessions.json).")
     args = parser.parse_args()
+
+    # Detect mode by step presence.
+    server_flags_set = any([args.host is not None, args.port is not None,
+                            args.jobs_dir is not None, args.max_concurrent is not None,
+                            args.allowed_repo is not None])
+    workflow_flags_set = any([
+        args.phase is not None, args.writer is not None, args.reviewer is not None,
+        args.spec is not None, args.plan is not None, args.config is not None,
+        args.claude_model is not None, args.codex_model is not None,
+        args.claude_effort is not None, args.codex_effort is not None,
+        args.base_sha is not None, args.resume_claude is not None,
+        args.resume_codex is not None, args.reset, args.dry_run,
+        args.max_iters != MAX_ITERS_DEFAULT, not args.stream,
+    ])
+
+    if args.step is None:
+        if workflow_flags_set:
+            parser.error("workflow flags not allowed in server mode (omit the step argument).")
+        from tango_server import run_server
+        run_server(args)
+        return
+    else:
+        if server_flags_set:
+            parser.error("server flags not allowed in workflow mode (omit --host/--port/--jobs-dir/--max-concurrent/--allowed-repo).")
+        # Require the workflow's required fields.
+        for f in ("phase", "writer", "reviewer"):
+            if getattr(args, f) is None:
+                parser.error(f"argument --{f} is required in workflow mode")
 
     cwd = pathlib.Path(args.repo_dir).resolve()
     if not (cwd / ".git").exists():
