@@ -10,6 +10,14 @@
 #   (writer_skills for writer steps, reviewer_skills for reviewer steps).
 # Omit or comment out any key to skip skill injection for that step.
 
+# [workflow]
+# writer   = "claude"   # default --writer, used when the flag is omitted
+# reviewer = "codex"    # default --reviewer, used when the flag is omitted
+# spec_dirs = ["specs", "docs/specs"]  # extra dirs (relative to repo_dir) searched for
+#                                      # phase-<N>.md after the conventional phases/ dir
+# plan_dirs = ["plans", "docs/plans"]  # extra dirs (relative to repo_dir) searched for
+#                                      # phase-<N>.md after the conventional plans/ dir
+
 # [agents.claude]
 # model = "claude-sonnet-4-6"             # default model for all steps
 # effort = "high"                         # default: low | medium | high | xhigh | max
@@ -18,17 +26,17 @@
 # plan_write_model  = "claude-opus-4-8"
 # plan_review_model = "claude-sonnet-4-6"
 # plan_fix_model    = "claude-sonnet-4-6"
-# code_write_model  = "claude-opus-4-8"
-# code_review_model = "claude-sonnet-4-6"
-# code_fix_model    = "claude-sonnet-4-6"
+# plan_write_model  = "claude-opus-4-8"
+# plan_review_model = "claude-sonnet-4-6"
+# plan_fix_model    = "claude-sonnet-4-6"
 #
 # -- per-step effort overrides --
 # plan_write_effort  = "high"
 # plan_review_effort = "medium"
 # plan_fix_effort    = "medium"
-# code_write_effort  = "max"
-# code_review_effort = "medium"
-# code_fix_effort    = "medium"
+# plan_write_effort  = "max"
+# plan_review_effort = "medium"
+# plan_fix_effort    = "medium"
 #
 # -- skills (slash-commands prepended to prompt) --
 # writer_skills   = ["/init"]             # fallback for all writer steps
@@ -36,9 +44,9 @@
 # plan_write_skills  = ["/init", "/spr"]  # overrides writer_skills for plan_write
 # plan_review_skills = ["/code-review"]   # overrides reviewer_skills for plan_review
 # plan_fix_skills    = ["/init"]
-# code_write_skills  = ["/run"]           # overrides writer_skills for code_write
-# code_review_skills = ["/code-review"]   # overrides reviewer_skills for code_review
-# code_fix_skills    = ["/run"]
+# plan_write_skills  = ["/run"]           # overrides writer_skills for plan_write
+# plan_review_skills = ["/code-review"]   # overrides reviewer_skills for plan_review
+# plan_fix_skills    = ["/run"]
 
 # [agents.codex]
 # model = "gpt-5.5"
@@ -48,17 +56,17 @@
 # plan_write_model  = "gpt-5.5"
 # plan_review_model = "gpt-5.4"
 # plan_fix_model    = "gpt-5.4"
-# code_write_model  = "gpt-5.5"
-# code_review_model = "gpt-5.4"
-# code_fix_model    = "gpt-5.4"
+# plan_write_model  = "gpt-5.5"
+# plan_review_model = "gpt-5.4"
+# plan_fix_model    = "gpt-5.4"
 #
 # -- per-step effort overrides --
 # plan_write_effort  = "high"
 # plan_review_effort = "medium"
 # plan_fix_effort    = "medium"
-# code_write_effort  = "high"
-# code_review_effort = "medium"
-# code_fix_effort    = "low"
+# plan_write_effort  = "high"
+# plan_review_effort = "medium"
+# plan_fix_effort    = "low"
 #
 # -- skills (Codex skill names prepended to prompt) --
 # writer_skills      = ["$init"]
@@ -66,9 +74,9 @@
 # plan_write_skills  = ["$init"]          # overrides writer_skills for plan_write
 # plan_review_skills = ["$review"]
 # plan_fix_skills    = ["$init"]
-# code_write_skills  = ["$run"]           # overrides writer_skills for code_write
-# code_review_skills = ["$review"]
-# code_fix_skills    = ["$run"]
+# plan_write_skills  = ["$run"]           # overrides writer_skills for plan_write
+# plan_review_skills = ["$review"]
+# plan_fix_skills    = ["$run"]
 
 [prompts]
 
@@ -115,7 +123,7 @@ Update the plan file at {plan_path} to address every issue above.
 Do not write any code yet.
 """
 
-code_write = """
+plan_write = """
 Implement the plan at {plan_path} (phase spec: {phase_spec}).
 
 Write the code changes for this phase only. When finished, stage and
@@ -123,7 +131,7 @@ commit your changes with git. Make one or more commits as appropriate,
 but do not touch files outside the scope of this phase's plan.
 """
 
-code_review = """
+plan_review = """
 Review the code changes for this phase.
 
 Phase spec: {phase_spec}
@@ -141,7 +149,7 @@ matching this shape:
 If verdict is APPROVED, issues should be an empty list.
 """
 
-code_fix = """
+plan_fix = """
 Your code changes for this phase were reviewed and need changes.
 
 Reviewer feedback:

@@ -2,17 +2,17 @@
 # Use with: tango implement --config examples/impl-prompts.toml ...
 
 [agents.claude]
-# code_write_model  = "claude-opus-4-8"
-# code_write_effort = "max"
-# code_write_skills = ["/run"]
+# plan_write_model  = "claude-opus-4-8"
+# plan_write_effort = "max"
+# plan_write_skills = ["/run"]
 
 [agents.codex]
-# code_write_model  = "gpt-5.5"
-# code_write_skills = ["$run"]
+# plan_write_model  = "gpt-5.5"
+# plan_write_skills = ["$run"]
 
 [prompts]
 
-code_write = """
+plan_write = """
 Implement the plan at {plan_path} (phase spec: {phase_spec}).
 
 Write the code changes for this phase only. When finished, stage and
@@ -21,7 +21,7 @@ commit your changes with git, using a commit message prefixed
 touch files outside the scope of this phase's plan.
 """
 
-code_review = """
+plan_review = """
 Review the code changes for this phase.
 
 Phase spec: {phase_spec}
@@ -39,7 +39,7 @@ matching this shape:
 If verdict is APPROVED, issues should be an empty list.
 """
 
-code_fix = """
+plan_fix = """
 Your code changes for this phase were reviewed and need changes.
 
 Reviewer feedback:

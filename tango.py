@@ -194,7 +194,7 @@ def load_prompts_config(script_dir, config_override=None, base_dir=None):
     if not config_path.exists():
         if config_override:
             sys.exit(f"Config file not found: {config_path}")
-        return
+        return None, None, [], []
     try:
         import tomllib
     except ImportError:
@@ -202,9 +202,10 @@ def load_prompts_config(script_dir, config_override=None, base_dir=None):
             import tomli as tomllib  # type: ignore
         except ImportError:
             print(f"Warning: {config_path} found but tomllib unavailable (needs Python 3.11+ or `pip install tomli`). Using built-in prompts.")
-            return
+            return None, None, [], []
     with open(config_path, "rb") as f:
         cfg = tomllib.load(f)
+    workflow = cfg.get("workflow", {})
     prompts = cfg.get("prompts", {})
     g = globals()
     for key, var in _PROMPT_KEYS.items():
@@ -232,8 +233,15 @@ def load_prompts_config(script_dir, config_override=None, base_dir=None):
     for agent_name, tags in AGENT_SKILLS.items():
         for tag, skills in tags.items():
             loaded.append(f"{agent_name} {tag} skills: {skills}")
+    spec_dirs = workflow.get("spec_dirs", [])
+    plan_dirs = workflow.get("plan_dirs", [])
+    if spec_dirs:
+        loaded.append(f"spec_dirs={spec_dirs}")
+    if plan_dirs:
+        loaded.append(f"plan_dirs={plan_dirs}")
     if loaded:
         print(f"[tango] loaded from {config_path.name}: {', '.join(loaded)}")
+    return workflow.get("writer"), workflow.get("reviewer"), spec_dirs, plan_dirs
 
 
 # ---------------------------------------------------------------------------
@@ -621,18 +629,30 @@ def _md_files_newer_than(cwd, since_time):
     return results
 
 
-def resolve_plan(phase, plan_override, plans_dir, cwd, since_time=None):
+def resolve_plan(phase, plan_override, plans_dirs, cwd, since_time=None):
     if plan_override:
         p = pathlib.Path(plan_override)
-        p = (cwd / p).resolve() if not p.is_absolute() else p.resolve()
+        if p.is_absolute():
+            p = p.resolve()
+        else:
+            p = (cwd / p).resolve()
+            if not p.exists():
+                for d in plans_dirs:
+                    candidate = d / plan_override
+                    if candidate.exists():
+                        return candidate
         if not p.exists():
-            sys.exit(f"Plan file not found: {p}")
+            sys.exit(f"Plan file not found: {p} (also tried: "
+                      f"{', '.join(str(d / plan_override) for d in plans_dirs)})")
         return p
-    conventional = plans_dir / f"phase-{phase}.md"
-    if conventional.exists():
-        return conventional
+    for d in plans_dirs:
+        candidate = d / f"phase-{phase}.md"
+        if candidate.exists():
+            return candidate
+    conventional = plans_dirs[0] / f"phase-{phase}.md"
     if since_time is None:
-        sys.exit(f"No plan file at {conventional}. Pass --plan <path> or rerun the plan step.")
+        sys.exit(f"No plan file found (tried: {', '.join(str(d) for d in plans_dirs)}). "
+                 f"Pass --plan <path> or rerun the plan step.")
     candidates = _md_files_newer_than(cwd, since_time)
     if len(candidates) == 1:
         print(f"[tango] auto-detected plan file: {candidates[0]}")
@@ -643,26 +663,39 @@ def resolve_plan(phase, plan_override, plans_dir, cwd, since_time=None):
     sys.exit(f"No plan file at {conventional} and no new .md files found after writer ran.")
 
 
-def resolve_spec(phase, spec_override, phases_dir, cwd=None):
+def resolve_spec(phase, spec_override, phases_dirs, cwd=None):
     if spec_override:
         p = pathlib.Path(spec_override)
-        p = (cwd / p).resolve() if (cwd and not p.is_absolute()) else p.resolve()
+        if p.is_absolute():
+            p = p.resolve()
+        else:
+            p = (cwd / p).resolve() if cwd else p.resolve()
+            if not p.exists():
+                for d in phases_dirs:
+                    candidate = d / spec_override
+                    if candidate.exists():
+                        return candidate
         if not p.exists():
             if DRY_RUN:
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(f"[dry-run] Spec for phase {phase}\n")
                 print(f"[DRY-RUN] created fake spec at {p}")
             else:
-                sys.exit(f"Spec file not found: {p}")
+                sys.exit(f"Spec file not found: {p} (also tried: "
+                          f"{', '.join(str(d / spec_override) for d in phases_dirs)})")
         return p
-    spec = phases_dir / f"phase-{phase}.md"
-    if not spec.exists():
-        if DRY_RUN:
-            spec.parent.mkdir(parents=True, exist_ok=True)
-            spec.write_text(f"[dry-run] Spec for phase {phase}\n")
-            print(f"[DRY-RUN] created fake spec at {spec}")
-        else:
-            sys.exit(f"Missing phase spec: {spec} (write your phase description there, or pass --spec <path>)")
+    for d in phases_dirs:
+        candidate = d / f"phase-{phase}.md"
+        if candidate.exists():
+            return candidate
+    spec = phases_dirs[0] / f"phase-{phase}.md"
+    if DRY_RUN:
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text(f"[dry-run] Spec for phase {phase}\n")
+        print(f"[DRY-RUN] created fake spec at {spec}")
+    else:
+        sys.exit(f"Missing phase spec (tried: {', '.join(str(d / f'phase-{phase}.md') for d in phases_dirs)}). "
+                 f"Write it there, or pass --spec <path>.")
     return spec
 
 
@@ -681,23 +714,35 @@ def log(tag, phase, agent, prompt, response):
 # ---------------------------------------------------------------------------
 
 
-def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir, state_dir, spec_override=None, plan_override=None):
+def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dirs, plans_dirs, state_dir, spec_override=None, plan_override=None):
     state = load_state(state_dir, phase)
 
     if state.get("plan_approved"):
         print(f"[phase {phase}] plan already approved, skipping.")
         return True
 
-    phase_spec = resolve_spec(phase, spec_override, phases_dir, cwd)
-    # Writer always saves to the conventional path; resolve_plan is used after write.
-    write_plan_path = plans_dir / f"phase-{phase}.md"
+    phase_spec = resolve_spec(phase, spec_override, phases_dirs, cwd)
+    # Writer saves to --plan's path if given (existing copy, or plans_dirs[0] if new);
+    # otherwise the conventional phase-<N>.md path. resolve_plan is used after write.
+    if plan_override:
+        op = pathlib.Path(plan_override)
+        if op.is_absolute():
+            write_plan_path = op.resolve()
+        else:
+            write_plan_path = (cwd / op).resolve()
+            if not write_plan_path.exists():
+                for d in plans_dirs:
+                    candidate = d / plan_override
+                    if candidate.exists():
+                        write_plan_path = candidate
+                        break
+                else:
+                    write_plan_path = plans_dirs[0] / plan_override
+    else:
+        write_plan_path = plans_dirs[0] / f"phase-{phase}.md"
     write_plan_path.parent.mkdir(parents=True, exist_ok=True)
 
-    override_exists = plan_override and (
-        (cwd / plan_override) if not pathlib.Path(plan_override).is_absolute()
-        else pathlib.Path(plan_override)
-    ).exists()
-    if write_plan_path.exists() or override_exists:
+    if write_plan_path.exists():
         print(f"[phase {phase}] plan file exists, skipping write step.")
         write_time = None
     else:
@@ -709,7 +754,7 @@ def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir,
         )
 
     # After write, resolve actual plan path (may differ if writer saved elsewhere)
-    plan_path = resolve_plan(phase, plan_override, plans_dir, cwd, since_time=write_time)
+    plan_path = resolve_plan(phase, plan_override, plans_dirs, cwd, since_time=write_time)
 
     fix_iter = state.get("plan_fix_iter", 0)
     remaining = max_iters - fix_iter
@@ -727,8 +772,6 @@ def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir,
             save_state(state_dir, phase, state)
             print(f"[phase {phase}] plan approved.")
             return True
-        if i == remaining:
-            break
         feedback = "\n".join(f"- [{x['severity']}] {x['description']}" for x in verdict["issues"]) or verdict["summary"]
         call_writer(
             writer,
@@ -743,15 +786,15 @@ def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir,
     return False
 
 
-def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_dir, state_dir, spec_override=None, plan_override=None, base_sha_override=None):
+def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dirs, plans_dirs, state_dir, spec_override=None, plan_override=None, base_sha_override=None):
     state = load_state(state_dir, phase)
 
     if state.get("code_approved"):
         print(f"[phase {phase}] code already approved, skipping.")
         return True
 
-    phase_spec = resolve_spec(phase, spec_override, phases_dir, cwd)
-    plan_path = resolve_plan(phase, plan_override, plans_dir, cwd)
+    phase_spec = resolve_spec(phase, spec_override, phases_dirs, cwd)
+    plan_path = resolve_plan(phase, plan_override, plans_dirs, cwd)
 
     # base_sha is captured once before first write and persisted; no commit prefix required.
     if base_sha_override:
@@ -799,8 +842,6 @@ def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dir, plans_
             save_state(state_dir, phase, state)
             print(f"[phase {phase}] code approved. Range: {base_sha[:7]}..{head_sha[:7]}")
             return True
-        if i == remaining:
-            break
         feedback = "\n".join(f"- [{x['severity']}] {x['description']}" for x in verdict["issues"]) or verdict["summary"]
         pre_fix_sha = get_head(cwd)
         call_writer(
@@ -871,10 +912,18 @@ def main():
                   f"Pass --repo-dir or set TANGO_REPO_DIR.")
     print(f"[tango] repo dir: {cwd}")
 
-    load_prompts_config(script_dir, config_override=args.config, base_dir=cwd)
+    cfg_writer, cfg_reviewer, cfg_spec_dirs, cfg_plan_dirs = load_prompts_config(
+        script_dir, config_override=args.config, base_dir=cwd)
+    args.writer = args.writer or cfg_writer
+    args.reviewer = args.reviewer or cfg_reviewer
+    for f in ("phase", "writer", "reviewer"):
+        if getattr(args, f) is None:
+            parser.error(f"argument --{f} is required in workflow mode (or set workflow.{f} in the config file)")
 
-    phases_dir = cwd / PHASES_DIR_NAME
-    plans_dir = cwd / PLANS_DIR_NAME
+    # Conventional dir always searched first; configured extra dirs (workflow.spec_dirs /
+    # workflow.plan_dirs, relative to repo_dir) are searched after it, in order.
+    phases_dirs = [cwd / PHASES_DIR_NAME] + [cwd / d for d in cfg_spec_dirs]
+    plans_dirs = [cwd / PLANS_DIR_NAME] + [cwd / d for d in cfg_plan_dirs]
     state_dir = cwd / STATE_DIR_NAME
     LOG_DIR = state_dir / "logs"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -923,12 +972,12 @@ def main():
     ok = True
     if args.step in ("plan", "phase"):
         ok = run_planning(args.phase, args.writer, args.reviewer, cwd, args.max_iters,
-                           phases_dir, plans_dir, state_dir, spec_override=args.spec, plan_override=args.plan)
+                           phases_dirs, plans_dirs, state_dir, spec_override=args.spec, plan_override=args.plan)
         if not ok:
             sys.exit(1)
     if args.step in ("implement", "phase"):
         ok = run_implementing(args.phase, args.writer, args.reviewer, cwd, args.max_iters,
-                               phases_dir, plans_dir, state_dir, spec_override=args.spec, plan_override=args.plan,
+                               phases_dirs, plans_dirs, state_dir, spec_override=args.spec, plan_override=args.plan,
                                base_sha_override=args.base_sha)
         if not ok:
             sys.exit(1)
