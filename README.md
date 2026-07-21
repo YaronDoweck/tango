@@ -207,8 +207,8 @@ python tango.py phase --phase 3 --writer claude --reviewer codex --max-iters 5
 | Flag                       | Purpose                                                        |
 |----------------------------|---------------------------------------------------------------|
 | `--phase N`                | Phase identifier (used for file names, state, commit grep). **Required.** |
-| `--writer claude\|codex`   | Agent that plans and codes. **Required.**                     |
-| `--reviewer claude\|codex` | Agent that reviews. **Required.**                             |
+| `--writer claude\|codex`   | Agent that plans and codes. Required unless `workflow.writer` is set in config. |
+| `--reviewer claude\|codex` | Agent that reviews. Required unless `workflow.reviewer` is set in config. |
 | `--repo-dir PATH`          | Target repository (or set `TANGO_REPO_DIR`). Default `.`.     |
 | `--max-iters N`            | Max review rounds before escalating. Default `5`.             |
 | `--spec PATH`              | Override the default `phases/phase-N.md` spec lookup.         |

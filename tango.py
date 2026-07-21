@@ -880,8 +880,10 @@ def main():
                         help="Path to spec file. Overrides the default phases/phase-<N>.md lookup.")
     parser.add_argument("--plan", default=None,
                         help="Path to plan file for the reviewer. Auto-detected by mtime scan if omitted.")
-    parser.add_argument("--writer", required=True, choices=["claude", "codex"])
-    parser.add_argument("--reviewer", required=True, choices=["claude", "codex"])
+    parser.add_argument("--writer", choices=["claude", "codex"],
+                        help="Agent that plans and codes (or workflow.writer in config).")
+    parser.add_argument("--reviewer", choices=["claude", "codex"],
+                        help="Agent that reviews (or workflow.reviewer in config).")
     parser.add_argument("--repo-dir", default=os.environ.get("TANGO_REPO_DIR", "."))
     parser.add_argument("--max-iters", type=int, default=5)
     parser.add_argument("--config", default=None, help="Path to config TOML file (default: tango-prompts.toml next to script).")
