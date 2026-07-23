@@ -28,6 +28,7 @@ import datetime
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import time
@@ -123,6 +124,18 @@ Respond with ONLY a JSON object, no other text, no markdown fences,
 matching this shape:
 {{"verdict": "APPROVED" or "CHANGES_NEEDED", "summary": "<one paragraph>", "issues": [{{"severity": "HIGH"|"MEDIUM"|"LOW", "description": "<specific issue>"}}]}}
 If verdict is APPROVED, issues should be an empty list.
+"""
+
+PLAN_LOCATE_PROMPT = """\
+The plan file was expected at: {expected_path}
+That file does not exist, so it was saved somewhere else (or under a
+different name).
+
+Find the plan file you just wrote and report its location.
+
+Respond with ONLY a JSON object, no other text, no markdown fences,
+matching this shape:
+{{"file_name": "<file name only, e.g. phase-3.md>", "path": "<directory it is in, absolute or relative to the repo root; empty string if the file is directly in the repo root>"}}
 """
 
 PLAN_FIX_PROMPT = """\
@@ -455,7 +468,7 @@ def _dry_print(label, agent, tag, n, prompt, extra=""):
 # ---------------------------------------------------------------------------
 
 
-def call_writer(agent, prompt, cwd, phase, tag):
+def call_writer(agent, prompt, cwd, phase, tag, plan_path=None):
     prompt = _inject_skills(prompt, agent, "writer", tag)
     if DRY_RUN:
         n = _dry_inc(phase, tag)
@@ -463,7 +476,7 @@ def call_writer(agent, prompt, cwd, phase, tag):
         response = f"[dry-run {tag} call {n}]"
         log(tag, phase, agent, prompt, response)
         if tag == "plan_write":
-            plan_path = cwd / PLANS_DIR_NAME / f"phase-{phase}.md"
+            plan_path = plan_path or cwd / PLANS_DIR_NAME / f"phase-{phase}.md"
             plan_path.parent.mkdir(parents=True, exist_ok=True)
             plan_path.write_text(
                 f"# Dry-run plan for phase {phase}\n\n"
@@ -471,7 +484,7 @@ def call_writer(agent, prompt, cwd, phase, tag):
             )
             print(f"[DRY-RUN] wrote fake plan → {plan_path}")
         elif tag == "plan_fix":
-            plan_path = cwd / PLANS_DIR_NAME / f"phase-{phase}.md"
+            plan_path = plan_path or cwd / PLANS_DIR_NAME / f"phase-{phase}.md"
             plan_path.write_text(
                 f"# Dry-run plan for phase {phase} (fix {n})\n\n"
                 f"Updated steps after reviewer feedback.\n"
@@ -490,6 +503,88 @@ def call_writer(agent, prompt, cwd, phase, tag):
         sys.exit(f"Unknown writer agent: {agent}")
     log(tag, phase, agent, prompt, text)
     return text
+
+
+def _load_session(agent):
+    if not SESSION_FILE or not SESSION_FILE.exists():
+        return None
+    try:
+        data = json.loads(SESSION_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    return data.get(agent)
+
+
+def _resume_writer(agent, prompt, cwd, tag):
+    """Resume the writer's own session (if we captured one) to ask it a
+    follow-up question. Returns None if there's no session to resume."""
+    global RESUME_CLAUDE, RESUME_CODEX
+    session_id = _load_session(agent)
+    if not session_id:
+        return None
+    if agent == "claude":
+        prev = RESUME_CLAUDE
+        RESUME_CLAUDE = session_id
+        try:
+            return run_claude(prompt, cwd, allowed_tools="Read,Bash(find *),Bash(ls *)",
+                               permission_mode="bypassPermissions", tag=tag)
+        finally:
+            RESUME_CLAUDE = prev
+    elif agent == "codex":
+        prev = RESUME_CODEX
+        RESUME_CODEX = session_id
+        try:
+            return run_codex(prompt, cwd, sandbox="read-only", tag=tag)
+        finally:
+            RESUME_CODEX = prev
+    return None
+
+
+def _locate_and_move_plan(writer, cwd, phase, expected_path, plans_dirs):
+    """Plan file wasn't found where we told the writer to save it. Resume
+    its session, ask where it actually put the file, then move it to
+    expected_path.
+
+    Returns (found: bool, reason: str). reason explains what went wrong
+    when found is False, for a useful exit message upstream."""
+    if DRY_RUN:
+        return False, "dry-run: locate step skipped"
+    prompt = PLAN_LOCATE_PROMPT.format(expected_path=expected_path)
+    try:
+        text = _resume_writer(writer, prompt, cwd, "plan_locate")
+    except RuntimeError as e:
+        return False, f"could not resume {writer} session to ask where it saved the plan: {e}"
+    log("plan_locate", phase, writer, prompt, text or "")
+    if not text:
+        return False, f"no {writer} session was captured, so it could not be asked where it saved the plan"
+    try:
+        info = extract_json(text)
+    except ValueError:
+        return False, f"{writer}'s reply wasn't valid JSON: {text[:300]!r}"
+    file_name = str(info.get("file_name") or "").strip()
+    path_str = str(info.get("path") or "").strip()
+    if not file_name:
+        return False, f"{writer} did not report a file_name: {info!r}"
+
+    candidates = []
+    if path_str:
+        p = pathlib.Path(path_str)
+        candidates.append(p / file_name if p.name != file_name else p)
+    else:
+        # No path given -- a bare file name is searched in the configured
+        # plan dirs, not assumed to be in the repo root.
+        candidates.extend(d / file_name for d in plans_dirs)
+    candidates.append(pathlib.Path(file_name))
+
+    for c in candidates:
+        c = c if c.is_absolute() else (cwd / c).resolve()
+        if c.is_file() and c != expected_path:
+            expected_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(c), str(expected_path))
+            print(f"[tango] located plan at {c}, moved to {expected_path}")
+            return True, ""
+    tried = ", ".join(str(c if c.is_absolute() else cwd / c) for c in candidates)
+    return False, f"{writer} reported file_name={file_name!r} path={path_str!r}, but none of these exist: {tried}"
 
 
 def call_reviewer(agent, prompt, cwd, phase, tag, state_dir):
@@ -613,23 +708,7 @@ def merge_writer_worktrees(cwd, base_sha):
 
 
 
-_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".eggs"}
-
-
-def _md_files_newer_than(cwd, since_time):
-    results = []
-    for p in pathlib.Path(cwd).rglob("*.md"):
-        if any(part in _SKIP_DIRS for part in p.parts):
-            continue
-        try:
-            if p.stat().st_mtime > since_time:
-                results.append(p)
-        except OSError:
-            pass
-    return results
-
-
-def resolve_plan(phase, plan_override, plans_dirs, cwd, since_time=None):
+def resolve_plan(phase, plan_override, plans_dirs, cwd):
     if plan_override:
         p = pathlib.Path(plan_override)
         if p.is_absolute():
@@ -649,18 +728,8 @@ def resolve_plan(phase, plan_override, plans_dirs, cwd, since_time=None):
         candidate = d / f"phase-{phase}.md"
         if candidate.exists():
             return candidate
-    conventional = plans_dirs[0] / f"phase-{phase}.md"
-    if since_time is None:
-        sys.exit(f"No plan file found (tried: {', '.join(str(d) for d in plans_dirs)}). "
-                 f"Pass --plan <path> or rerun the plan step.")
-    candidates = _md_files_newer_than(cwd, since_time)
-    if len(candidates) == 1:
-        print(f"[tango] auto-detected plan file: {candidates[0]}")
-        return candidates[0]
-    if len(candidates) > 1:
-        sys.exit(f"Multiple .md files written since writer ran; specify --plan <path>:\n  " +
-                 "\n  ".join(str(c) for c in candidates))
-    sys.exit(f"No plan file at {conventional} and no new .md files found after writer ran.")
+    sys.exit(f"No plan file found (tried: {', '.join(str(d) for d in plans_dirs)}). "
+             f"Pass --plan <path> or rerun the plan step.")
 
 
 def resolve_spec(phase, spec_override, phases_dirs, cwd=None):
@@ -746,15 +815,19 @@ def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dirs, plans_dir
         print(f"[phase {phase}] plan file exists, skipping write step.")
         write_time = None
     else:
-        write_time = time.time()
         call_writer(
             writer,
             PLAN_WRITE_PROMPT.format(phase_spec=phase_spec, plan_path=write_plan_path, phase=phase),
-            cwd, phase, "plan_write",
+            cwd, phase, "plan_write", plan_path=write_plan_path,
         )
+        if not write_plan_path.exists():
+            found, reason = _locate_and_move_plan(writer, cwd, phase, write_plan_path, plans_dirs)
+            if not found:
+                sys.exit(f"{writer} did not write the requested plan: {write_plan_path}\n"
+                         f"Tried asking {writer} where it saved the file: {reason}\n"
+                         "Check the writer log and rerun the plan step.")
 
-    # After write, resolve actual plan path (may differ if writer saved elsewhere)
-    plan_path = resolve_plan(phase, plan_override, plans_dirs, cwd, since_time=write_time)
+    plan_path = write_plan_path
 
     fix_iter = state.get("plan_fix_iter", 0)
     remaining = max_iters - fix_iter
@@ -772,11 +845,13 @@ def run_planning(phase, writer, reviewer, cwd, max_iters, phases_dirs, plans_dir
             save_state(state_dir, phase, state)
             print(f"[phase {phase}] plan approved.")
             return True
+        if abs_iter >= max_iters:
+            break
         feedback = "\n".join(f"- [{x['severity']}] {x['description']}" for x in verdict["issues"]) or verdict["summary"]
         call_writer(
             writer,
             PLAN_FIX_PROMPT.format(plan_path=plan_path, feedback=feedback),
-            cwd, phase, "plan_fix",
+            cwd, phase, "plan_fix", plan_path=plan_path,
         )
         state["plan_fix_iter"] = abs_iter
         save_state(state_dir, phase, state)
@@ -842,6 +917,8 @@ def run_implementing(phase, writer, reviewer, cwd, max_iters, phases_dirs, plans
             save_state(state_dir, phase, state)
             print(f"[phase {phase}] code approved. Range: {base_sha[:7]}..{head_sha[:7]}")
             return True
+        if abs_iter >= max_iters:
+            break
         feedback = "\n".join(f"- [{x['severity']}] {x['description']}" for x in verdict["issues"]) or verdict["summary"]
         pre_fix_sha = get_head(cwd)
         call_writer(
@@ -879,7 +956,7 @@ def main():
     parser.add_argument("--spec", default=None,
                         help="Path to spec file. Overrides the default phases/phase-<N>.md lookup.")
     parser.add_argument("--plan", default=None,
-                        help="Path to plan file for the reviewer. Auto-detected by mtime scan if omitted.")
+                        help="Path to plan file to write and review (default: phase-N.md in the first plan directory).")
     parser.add_argument("--writer", choices=["claude", "codex"],
                         help="Agent that plans and codes (or workflow.writer in config).")
     parser.add_argument("--reviewer", choices=["claude", "codex"],
@@ -922,10 +999,9 @@ def main():
         if getattr(args, f) is None:
             parser.error(f"argument --{f} is required in workflow mode (or set workflow.{f} in the config file)")
 
-    # Conventional dir always searched first; configured extra dirs (workflow.spec_dirs /
-    # workflow.plan_dirs, relative to repo_dir) are searched after it, in order.
+    # Configured directories replace the defaults; the first configured directory is the writer target.
     phases_dirs = [cwd / PHASES_DIR_NAME] + [cwd / d for d in cfg_spec_dirs]
-    plans_dirs = [cwd / PLANS_DIR_NAME] + [cwd / d for d in cfg_plan_dirs]
+    plans_dirs = [cwd / d for d in cfg_plan_dirs] or [cwd / PLANS_DIR_NAME]
     state_dir = cwd / STATE_DIR_NAME
     LOG_DIR = state_dir / "logs"
     state_dir.mkdir(parents=True, exist_ok=True)

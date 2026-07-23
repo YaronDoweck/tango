@@ -212,7 +212,7 @@ python tango.py phase --phase 3 --writer claude --reviewer codex --max-iters 5
 | `--repo-dir PATH`          | Target repository (or set `TANGO_REPO_DIR`). Default `.`.     |
 | `--max-iters N`            | Max review rounds before escalating. Default `5`.             |
 | `--spec PATH`              | Override the default `phases/phase-N.md` spec lookup.         |
-| `--plan PATH`              | Plan file for the reviewer. Auto-detected if omitted.         |
+| `--plan PATH`              | Plan file to write and review. Defaults to `plans/phase-N.md`, or `phase-N.md` in the first configured `plan_dirs` entry. |
 | `--config PATH`            | Prompt/model overrides (TOML). See [Configuration](#configuration). |
 | `--claude-model` / `--codex-model` | Per-agent model override.                             |
 | `--claude-effort` / `--codex-effort` | Per-agent reasoning effort.                        |
